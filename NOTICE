@@ -1,0 +1,18 @@
+yuzic-engine
+Copyright 2026 yuzic contributors
+
+This product includes software developed for yuzic
+(https://github.com/eftpmc/yuzic).
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+--------------------------------------------------------------------------------
+Third-party notices
+--------------------------------------------------------------------------------
+
+This project deliberately contains no code from @rntp/player v5 or later, which
+is proprietary and whose licence forbids using it to build a competing product.
+
+react-native-track-player v4 and earlier is Apache-2.0 and may legitimately be
+referenced. Nothing has been taken from it so far. Anything taken in future is
+recorded here, with the change stated, as Apache-2.0 §4 requires.

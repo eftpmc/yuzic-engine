@@ -74,18 +74,33 @@ next; read the queue, the active item and its index.
 - **DSP**: a working equalizer, replay gain / normalisation.
 - Whatever the audio-graph architecture makes cheap once it exists.
 
-## Open decisions
+## Decided
 
-- **Licence for this repo.** Not yet chosen. Permissive (Apache-2.0, matching
-  RNTP v4, patent grant included) keeps it usable by yuzic under GPL-3 and by
-  anyone else; copyleft would restrict adoption. Deliberately left unset until
-  decided — an unlicensed repo is all-rights-reserved, which is fine while
-  private.
-- **Architecture**: queue-player wrapper vs full audio graph. If crossfade and
-  DSP are both in scope, it's a graph — AVAudioEngine on iOS, ExoPlayer audio
-  processors on Android — and that decision wants making before any code.
-- **Native module layer**: yuzic already depends on `react-native-nitro-modules`.
-- **The iOS cache** is the biggest unknown. Android gets it close to free from
-  Media3's `SimpleCache`/`CacheDataSource`; iOS has no equivalent and means
-  either `AVAssetResourceLoader` with manual range handling or a local proxy.
-  Worth a spike before committing to a design.
+Reasoning for each is in [docs/architecture.md](docs/architecture.md).
+
+- **Licence: Apache-2.0.** Permissive, patent grant, same as react-native-track-
+  player v4. yuzic consumes it under GPL-3 without friction, and it does not
+  impose on anyone else the kind of restriction this project exists to escape.
+- **A graph, not a queue player.** Crossfade and a real equalizer are not
+  expressible against a single-output player; that is the wall every existing
+  RN player hits.
+- **Remote audio is fetched to disk and played from there.** The graph plays
+  files, and yuzic already caches everything to disk, so streaming and caching
+  become one path instead of two.
+- **The queue lives natively.** Backgrounded JS gets suspended; the lock screen
+  and the car must keep working anyway.
+- **`MPNowPlayingInfoCenter.playbackState` is set explicitly.** Taken straight
+  from the bug that made CarPlay show "paused" while audio played.
+
+## Still open
+
+- **Bridge**: Nitro (already a yuzic dependency) vs the Expo Modules API
+  (better config-plugin ergonomics, and the plugin work is needed either way).
+  Leaning Nitro.
+- **Gapless detection**: encoder delay/padding metadata, or the host's word.
+- **Hi-res**: switch the graph's sample rate to match the source, or resample.
+  Constrains the mixer, so it wants deciding before the mixer is built.
+- **The iOS cache is the biggest unknown** and deserves a spike before the rest
+  of the iOS work: `AVAssetResourceLoader` with manual range handling, a local
+  proxy, or a plain ranged fetcher of our own. Android gets this close to free
+  from Media3.
