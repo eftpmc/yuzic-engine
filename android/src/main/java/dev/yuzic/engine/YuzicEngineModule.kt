@@ -52,6 +52,10 @@ class YuzicEngineModule : Module() {
     AsyncFunction("setup") { options: SetupOptions? ->
       configureAudioSession(options?.pauseOnBecomingNoisy ?: true)
       PlaybackService.eventSink = { name, body -> sendEvent(name, body) }
+      // Honoured, unlike on iOS, which declares the same field and then ticks
+      // at a hardcoded 250ms regardless. Worth not copying: the host asked.
+      progressIntervalMs = (options?.progressIntervalMs ?: 1000).coerceAtLeast(100).toLong()
+      onMain { startObserving() }
     }
 
     AsyncFunction("teardown") {
@@ -59,6 +63,8 @@ class YuzicEngineModule : Module() {
       // the session may still fire — and sending an event into a JS context
       // that is being torn down is a crash rather than a no-op.
       PlaybackService.eventSink = null
+      onMain { stopObserving() }
+      sleepTimer.cancel()
       controllerFuture?.let { MediaController.releaseFuture(it) }
       controllerFuture = null
       TrackHeaders.clear()
@@ -364,6 +370,109 @@ class YuzicEngineModule : Module() {
    * itself. Without this the two disagree the moment anyone presses next, and
    * the crossfade rules start reasoning about the wrong pair of tracks.
    */
+  // MARK: - Telling the host what happened
+  //
+  // Until this existed, `onProgress`, `onStateChange` and `onTrackChange` were
+  // declared in `Events(...)` and emitted by nothing, so a host on Android
+  // could ask where it was and never be told. The three come from two places:
+  // Media3 pushes state and track transitions, and position has to be polled
+  // because no player anywhere reports it continuously.
+
+  private var progressIntervalMs: Long = 1000
+  private var lastState: String? = null
+  private var trackStartedAtMillis: Long = 0
+  private var observing = false
+
+  private val ticker = object : Runnable {
+    override fun run() {
+      emitProgress()
+      main.postDelayed(this, progressIntervalMs)
+    }
+  }
+
+  private val playerListener = object : Player.Listener {
+    override fun onPlaybackStateChanged(state: Int) = emitStateIfChanged()
+    override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = emitStateIfChanged()
+
+    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+      val player = PlaybackService.graph?.activeVoice?.player ?: return
+      syncActiveIndexFrom(player)
+      // Before the payload is built, because the new track's loudness has to be
+      // right from its first sample rather than corrected once it is audible.
+      applyVolume()
+
+      val now = System.currentTimeMillis()
+      val listened = if (trackStartedAtMillis > 0) (now - trackStartedAtMillis) / 1000.0 else null
+      trackStartedAtMillis = now
+
+      val payload = mutableMapOf<String, Any?>("index" to player.currentMediaItemIndex)
+      mediaItem?.mediaId?.let { payload["id"] = it }
+      listened?.let { payload["previousListenedSec"] = it }
+      sendEvent("onTrackChange", payload)
+    }
+
+    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+      sendEvent(
+        "onError",
+        mapOf(
+          "code" to "PLAYBACK_FAILED",
+          "message" to (error.message ?: error.errorCodeName),
+        ),
+      )
+    }
+  }
+
+  /** Main thread only — both the listener and the ticker touch the player. */
+  private fun startObserving() {
+    if (observing) return
+    val graph = PlaybackService.graph ?: return
+    // Both voices, because during a crossfade the one that matters changes
+    // halfway through and a listener on only the foreground player would go
+    // quiet for the second half of every transition.
+    graph.voiceA.player.addListener(playerListener)
+    graph.voiceB.player.addListener(playerListener)
+    observing = true
+    trackStartedAtMillis = System.currentTimeMillis()
+    main.postDelayed(ticker, progressIntervalMs)
+  }
+
+  private fun stopObserving() {
+    val graph = PlaybackService.graph
+    graph?.voiceA?.player?.removeListener(playerListener)
+    graph?.voiceB?.player?.removeListener(playerListener)
+    main.removeCallbacks(ticker)
+    observing = false
+    lastState = null
+  }
+
+  /**
+   * Only on an actual change, matching the iOS engine, where `state` emits from
+   * a `didSet` guarded on inequality. Media3 fires its callbacks more often
+   * than the state changes — `onPlayWhenReadyChanged` alone repeats for every
+   * pause reason — and a host re-rendering on each one is a cost it did not ask
+   * for.
+   */
+  private fun emitStateIfChanged() {
+    val player = PlaybackService.graph?.activeVoice?.player ?: return
+    val state = stateName(player)
+    if (state == lastState) return
+    lastState = state
+    sendEvent("onStateChange", mapOf("state" to state))
+  }
+
+  private fun emitProgress() {
+    val player = PlaybackService.graph?.activeVoice?.player ?: return
+    val duration = player.duration
+    sendEvent(
+      "onProgress",
+      mapOf(
+        "positionSec" to player.currentPosition.coerceAtLeast(0) / 1000.0,
+        "durationSec" to if (duration == androidx.media3.common.C.TIME_UNSET) 0.0 else duration / 1000.0,
+        "bufferedSec" to ((player.bufferedPosition - player.currentPosition).coerceAtLeast(0)) / 1000.0,
+      ),
+    )
+  }
+
   /**
    * Push `user volume × the active track's replay gain` to both players.
    *
