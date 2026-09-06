@@ -1,14 +1,80 @@
 import { requireNativeModule } from 'expo-modules-core';
 
 import type { AudioEngine } from './AudioEngine';
+import type { EngineEvent, PlaybackState, Progress, MediaId } from './types';
 
 /**
- * The native module, typed as the interface it implements.
+ * The native module, plus the one thing that cannot be a straight pass-through.
  *
- * Nothing clever happens here on purpose. Every rule that could be enforced in
- * JavaScript is enforced natively instead — the crossfade clamps, the
- * gapless hard-cut, the sample-rate/crossfade exclusion — because JavaScript is
- * suspended in the background and a rule that only holds while the app is in
- * the foreground is not a rule.
+ * Expo's event emitter is **name-based** — `addListener('onProgress', fn)`,
+ * one subscription per event — while `AudioEngine.addListener` takes a single
+ * listener and a discriminated union. That union is the better API for a
+ * consumer: one subscription, one exhaustive switch, no chance of forgetting
+ * that `onError` exists. But it is not what the runtime does, and declaring it
+ * over `requireNativeModule` was simply a lie about the shape — it typechecked
+ * and then threw "Value is a function, expected a String" the first time
+ * anything subscribed.
+ *
+ * So the union is assembled here, over the six named events the module
+ * declares. If a name is added natively it must be added to `EVENTS` too;
+ * that duplication is the price of the nicer surface, and it is small and
+ * visible rather than spread across call sites.
  */
-export const YuzicEngine = requireNativeModule<AudioEngine>('YuzicEngine');
+
+type NativeModule = Omit<AudioEngine, 'addListener'> & {
+  addListener(name: string, listener: (payload: any) => void): { remove(): void };
+};
+
+const native = requireNativeModule<NativeModule>('YuzicEngine');
+
+const EVENTS = [
+  'onStateChange',
+  'onTrackChange',
+  'onProgress',
+  'onQueueChange',
+  'onError',
+  'onRemoteCommand',
+] as const;
+
+function toEvent(name: (typeof EVENTS)[number], payload: any): EngineEvent | null {
+  switch (name) {
+    case 'onStateChange':
+      return { type: 'stateChange', state: payload.state as PlaybackState };
+    case 'onTrackChange':
+      return {
+        type: 'trackChange',
+        index: payload.index as number,
+        id: (payload.id ?? null) as MediaId | null,
+        previousListenedSec: payload.previousListenedSec as number | undefined,
+      };
+    case 'onProgress':
+      return {
+        type: 'progress',
+        progress: {
+          positionSec: payload.positionSec,
+          durationSec: payload.durationSec,
+          bufferedSec: payload.bufferedSec ?? 0,
+        } as Progress,
+      };
+    case 'onQueueChange':
+      return { type: 'queueChange' };
+    case 'onError':
+      return { type: 'error', code: payload.code, message: payload.message, id: payload.id };
+    case 'onRemoteCommand':
+      return { type: 'remoteCommand', command: payload.command, payload: payload.payload };
+    default:
+      return null;
+  }
+}
+
+export const YuzicEngine: AudioEngine = Object.assign(Object.create(native), {
+  addListener(listener: (event: EngineEvent) => void): () => void {
+    const subscriptions = EVENTS.map(name =>
+      native.addListener(name, (payload: any) => {
+        const event = toEvent(name, payload ?? {});
+        if (event) listener(event);
+      })
+    );
+    return () => subscriptions.forEach(subscription => subscription.remove());
+  },
+}) as AudioEngine;

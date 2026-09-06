@@ -21,7 +21,8 @@ import AVFoundation
 public final class YuzicEngineModule: Module {
 
   private var graph: AudioGraph?
-  private let queue = PlaybackQueue()
+  private var engine: PlaybackEngine?
+  private var sleepTimer: SleepTimer?
 
   public func definition() -> ModuleDefinition {
     Name("YuzicEngine")
@@ -32,14 +33,29 @@ public final class YuzicEngineModule: Module {
 
     AsyncFunction("setup") { (options: SetupOptions?) in
       try self.configureAudioSession(pauseOnBecomingNoisy: options?.pauseOnBecomingNoisy ?? true)
-      let graph = self.graph ?? AudioGraph()
-      try graph.start()
-      self.graph = graph
+
+      if self.engine == nil {
+        let graph = AudioGraph()
+        try graph.start()
+        let engine = PlaybackEngine(graph: graph, factory: HTTPTrackReaderFactory())
+        engine.onEvent = { [weak self] event in self?.forward(event) }
+        self.graph = graph
+        self.engine = engine
+        self.sleepTimer = SleepTimer { [weak self] fade in
+          // Fade rather than cut: music stopping mid-bar is what wakes people,
+          // which is the opposite of the point.
+          guard let self, let graph = self.graph else { return }
+          graph.fade(graph.activeVoice, to: 0, over: fade) { self.engine?.pause() }
+        }
+      }
     }
 
     AsyncFunction("teardown") {
+      self.engine?.stop()
+      self.engine = nil
       self.graph?.stop()
       self.graph = nil
+      self.sleepTimer?.cancel()
       try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -50,23 +66,36 @@ public final class YuzicEngineModule: Module {
     // has to update, and the car still has to answer its buttons.
 
     AsyncFunction("setQueue") { (tracks: [TrackRecord], startIndex: Int?) in
-      self.queue.set(tracks.map(\.asTrack), startIndex: startIndex ?? 0)
+      self.engine?.setQueue(tracks.map(\.asTrack), startIndex: startIndex ?? 0)
       self.sendEvent("onQueueChange", [:])
     }
 
     AsyncFunction("append") { (tracks: [TrackRecord]) in
-      self.queue.append(tracks.map(\.asTrack))
+      self.engine?.queue.append(tracks.map(\.asTrack))
       self.sendEvent("onQueueChange", [:])
     }
 
     AsyncFunction("getActiveIndex") { () -> Int in
-      self.queue.activeIndex
+      self.engine?.queue.activeIndex ?? 0
     }
 
     // MARK: transport
 
-    AsyncFunction("play") { self.graph?.activeVoice.player.play() }
-    AsyncFunction("pause") { self.graph?.activeVoice.player.pause() }
+    AsyncFunction("play") { try self.engine?.play() }
+    AsyncFunction("pause") { self.engine?.pause() }
+    AsyncFunction("stop") { self.engine?.stop() }
+    AsyncFunction("seekTo") { (positionSec: Double) in try self.engine?.seek(toSeconds: positionSec) }
+    AsyncFunction("skipToNext") { try self.engine?.skipToNext() }
+    AsyncFunction("skipToPrevious") { try self.engine?.skipToPrevious() }
+    AsyncFunction("skipToIndex") { (index: Int) in try self.engine?.skipTo(index: index) }
+    AsyncFunction("setVolume") { (volume: Double) in
+      self.graph.map { $0.activeVoice.gain.outputVolume = Float(max(0, min(1, volume))) }
+    }
+
+    // MARK: sleep timer
+
+    AsyncFunction("sleepAfter") { (seconds: Double) in self.sleepTimer?.schedule(after: seconds) }
+    AsyncFunction("cancelSleep") { self.sleepTimer?.cancel() }
 
     // MARK: the reasons this exists
 
@@ -77,7 +106,7 @@ public final class YuzicEngineModule: Module {
     }
 
     AsyncFunction("setCrossfade") { (options: CrossfadeRecord?) in
-      self.queue.crossfade = options?.asSettings
+      self.engine?.queue.crossfade = options?.asSettings
     }
 
     AsyncFunction("setSampleRateMode") { (mode: String) in
@@ -87,14 +116,14 @@ public final class YuzicEngineModule: Module {
       // buffer, so bit-perfect output and a crossfade in progress cannot
       // coexist. Resolved here rather than left as two settings that fight.
       let resolved = SampleRateMode(rawValue: mode) ?? .fixed
-      if resolved == .matchSource, self.queue.crossfade != nil {
-        self.queue.crossfade = nil
+      if resolved == .matchSource, self.engine?.queue.crossfade != nil {
+        self.engine?.queue.crossfade = nil
         self.sendEvent("onError", [
           "code": "CROSSFADE_DISABLED",
           "message": "Crossfade turned off: the hardware sample rate cannot change mid-fade.",
         ])
       }
-      self.queue.sampleRateMode = resolved
+      self.engine?.queue.sampleRateMode = resolved
     }
   }
 
@@ -103,6 +132,26 @@ public final class YuzicEngineModule: Module {
    screen locks and the routing policy that tells the system this is music
    rather than a game or a call.
    */
+  /// Engine events, translated for JavaScript. One place, so the event names
+  /// and payload shapes cannot drift between here and the TypeScript types.
+  private func forward(_ event: PlaybackEngine.Event) {
+    switch event {
+    case .stateChanged(let state):
+      sendEvent("onStateChange", ["state": state.rawValue])
+    case .trackChanged(let index, let id, let listened):
+      var payload: [String: Any] = ["index": index]
+      if let id { payload["id"] = id }
+      if let listened { payload["previousListenedSec"] = listened }
+      sendEvent("onTrackChange", payload)
+    case .progress(let position, let duration):
+      sendEvent("onProgress", ["positionSec": position, "durationSec": duration])
+    case .ended:
+      sendEvent("onStateChange", ["state": "ended"])
+    case .failed(let message):
+      sendEvent("onError", ["code": "PLAYBACK_FAILED", "message": message])
+    }
+  }
+
   private func configureAudioSession(pauseOnBecomingNoisy: Bool) throws {
     let session = AVAudioSession.sharedInstance()
     try session.setCategory(.playback, mode: .default, policy: .longFormAudio)
