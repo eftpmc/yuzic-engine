@@ -76,6 +76,12 @@ class PlaybackService : MediaLibraryService() {
 
     private const val BROWSE_ROOT_ID = "yuzic:root"
 
+    /**
+     * The session's id. Explicit because Media3's default is `""`, and an empty
+     * id cannot satisfy the uniqueness it then enforces.
+     */
+    private const val SESSION_ID = "yuzic-engine"
+
     fun attachGraph(graph: AudioGraph) {
       this.graph = graph
     }
@@ -104,8 +110,22 @@ class PlaybackService : MediaLibraryService() {
     graph.voiceA.player.setAudioAttributes(attributes, true)
     graph.voiceB.player.setAudioAttributes(attributes, true)
 
-    session = MediaLibrarySession.Builder(this, EnginePlayer(graph), LibraryCallback())
-      .build()
+    // Two things here, both learned by running it. Media3 keeps a per-process
+    // registry of session ids and refuses a duplicate, and the Builder's
+    // default id is the empty string — so a second session in one process
+    // collides with the first and throws
+    // `IllegalStateException: Session ID must be unique. ID=`, taking the
+    // service down in `onCreate`. That is not hypothetical: a dev-client JS
+    // reload, or the system restarting the service while the old one is still
+    // registered, both reach here twice.
+    //
+    // So: never build a second one, and give the first a real id rather than
+    // relying on a default that cannot be unique.
+    if (session == null) {
+      session = MediaLibrarySession.Builder(this, EnginePlayer(graph), LibraryCallback())
+        .setId(SESSION_ID)
+        .build()
+    }
   }
 
   override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? = session
