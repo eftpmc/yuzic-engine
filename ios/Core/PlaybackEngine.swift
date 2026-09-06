@@ -269,6 +269,26 @@ public final class PlaybackEngine {
     return positionSec >= durationSec - transitionSec
   }
 
+  /**
+   Where playback is now, asked rather than waited for.
+
+   The host gets this as an event on a timer, but an event stream is no use to
+   something that has just mounted: a screen opened mid-track would show zero
+   until the next tick. Cheap enough to ask directly, and it reads the same
+   values the tick emits rather than a cached copy that could disagree.
+   */
+  public var progress: (positionSec: Double, durationSec: Double) {
+    guard let playback = activePlayback, let reader = activeReader, reader.sampleRate > 0 else {
+      return (0, 0)
+    }
+    return (
+      Double(playback.currentFrame) / reader.sampleRate,
+      // A live stream has no finish line, and reporting the bytes fetched so
+      // far as a duration draws a progress bar that lies.
+      queue.activeTrack?.continuous == true ? 0 : Double(reader.totalFrames) / reader.sampleRate
+    )
+  }
+
   private func tick() {
     guard let playback = activePlayback, let reader = activeReader, reader.sampleRate > 0 else { return }
     let position = Double(playback.currentFrame) / reader.sampleRate

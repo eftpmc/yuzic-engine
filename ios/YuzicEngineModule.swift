@@ -81,6 +81,28 @@ public final class YuzicEngineModule: Module {
 
     // MARK: transport
 
+    AsyncFunction("getState") { () -> String in
+      self.engine?.state.rawValue ?? PlaybackEngine.PlaybackState.idle.rawValue
+    }
+
+    /**
+     Asked rather than waited for.
+
+     Progress arrives as an event on a timer, which is no use to a screen that
+     has just mounted mid-track — it would show zero until the next tick.
+     */
+    AsyncFunction("getProgress") { () -> [String: Any] in
+      let progress = self.engine?.progress ?? (positionSec: 0, durationSec: 0)
+      return [
+        "positionSec": progress.positionSec,
+        "durationSec": progress.durationSec,
+        // Not yet measured: the cache knows what it has fetched, but nothing
+        // reports it upward. Zero rather than a guess, so a buffering bar shows
+        // nothing rather than something wrong.
+        "bufferedSec": 0,
+      ]
+    }
+
     AsyncFunction("play") { try self.engine?.play() }
     AsyncFunction("pause") { self.engine?.pause() }
     AsyncFunction("stop") { self.engine?.stop() }

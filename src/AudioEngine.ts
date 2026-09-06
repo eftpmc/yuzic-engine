@@ -105,6 +105,17 @@ export interface AudioEngine {
   setSampleRateMode(mode: SampleRateMode): Promise<void>;
 
   // ── cache ────────────────────────────────────────────────────────────────
+  //
+  // NOT IMPLEMENTED YET on iOS. Caching today is per-track and in memory: a
+  // `CachedByteSource` holds the ranges it has fetched for as long as the track
+  // is playing, and they go when it does. There is no disk cache for these to
+  // configure, measure or evict from, so calling them throws rather than
+  // quietly doing nothing.
+  //
+  // Left declared deliberately — the shape is settled and yuzic needs `evict`
+  // when a download is deleted — but a documented method that silently does
+  // nothing is worse than an absent one, because nobody files a bug against a
+  // feature they believe is working.
 
   configureCache(options: CacheOptions): Promise<void>;
   clearCache(): Promise<void>;
