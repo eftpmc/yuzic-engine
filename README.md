@@ -95,8 +95,23 @@ Reasoning for each is in [docs/architecture.md](docs/architecture.md).
 ## Still open
 
 - **Gapless detection**: encoder delay/padding metadata, or the host's word.
-- **Android**: the shape is decided (Media3 gives most of this close to free)
-  but nothing has been compiled yet.
+- **Android is half a bridge.** It compiles now — it did not before, and the
+  three errors were the kind only a compiler finds: a companion property read
+  above its own initialiser, a `this.graph` that resolved to the service rather
+  than the companion, and a smart cast the compiler refused for a reason that
+  is real at runtime.
+
+  What it does not have is the other half of the JS surface. Twelve of iOS's
+  twenty-four functions are missing: `seekTo`, `stop`, `skipToNext`,
+  `skipToPrevious`, `skipToIndex`, `setVolume`, `getProgress`, `getState`,
+  `sleepAfter`, `cancelSleep`, `setReplayGain`, `clearBrowseTree`. So Android
+  can set a queue and play or pause it, and cannot seek, skip, stop, or answer
+  where it has got to.
+
+  The capability is mostly there a layer down — `EnginePlayer` already
+  implements `seekTo`, `stop`, position, duration and buffered position. The
+  gap is the bridge, not the engine, which makes this translation work rather
+  than design work.
 - **Seek cost, measured**: a seek now abandons the request it was waiting on
   promptly rather than at the HTTP timeout, but time-to-first-sample into an
   unfetched region has still never been timed end to end. See open question 3.

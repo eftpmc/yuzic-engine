@@ -57,6 +57,11 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     var browseRoot: BrowseNodeRecord? = null
 
+    // Declared above `enabledCommands` because a companion's properties are
+    // initialised in declaration order, and the one below reads this one. The
+    // other way round it compiles as far as the reader's eye and no further.
+    val DEFAULT_COMMANDS = setOf("playPause", "next", "previous", "seek")
+
     /** Which remote controls the host asked to advertise. */
     @Volatile
     var enabledCommands: Set<String> = DEFAULT_COMMANDS
@@ -68,8 +73,6 @@ class PlaybackService : MediaLibraryService() {
      */
     @Volatile
     var eventSink: ((String, Map<String, Any?>) -> Unit)? = null
-
-    val DEFAULT_COMMANDS = setOf("playPause", "next", "previous", "seek")
 
     private const val BROWSE_ROOT_ID = "yuzic:root"
 
@@ -85,7 +88,10 @@ class PlaybackService : MediaLibraryService() {
   override fun onCreate() {
     super.onCreate()
 
-    val graph = this.graph ?: AudioGraph(this, OkHttpClient()).also { attachGraph(it) }
+    // `Engine.graph`, not `this.graph`: the graph lives on the companion so it
+    // survives the service being restarted by the system with no module alive.
+    // `this` here is the service instance, which does not have one.
+    val graph = Engine.graph ?: AudioGraph(this, OkHttpClient()).also { attachGraph(it) }
 
     // AudioAttributes with handleAudioFocus is what makes the engine a good
     // citizen: ducking for navigation prompts, pausing for a call, and resuming
@@ -196,8 +202,13 @@ class PlaybackService : MediaLibraryService() {
         ?: return Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE))
 
       val children = node.children.orEmpty().map { child ->
-        if (child.playable != null) {
-          child.playable.toMediaItem()
+        // Read once into a local. `playable` is a `var` on a record the host
+        // can replace, so the compiler will not smart-cast it — and the reason
+        // it will not is real here: a `setBrowseTree` landing between the null
+        // check and the use is exactly what this service is built to survive.
+        val playable = child.playable
+        if (playable != null) {
+          playable.toMediaItem()
         } else {
           browsableItem(child.id, child.title, child.subtitle, child.artworkUri)
         }
