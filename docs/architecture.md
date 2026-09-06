@@ -412,7 +412,12 @@ go/no-go:
    **Half done — cancellation, yes**, once it was built: `cancel` reached only
    as far as a flag `ensure` read between fetches, so a seek waited out the
    request it had arrived during. `ByteFetcher.cancel` now abandons the task,
-   and the bound is the cancel rather than the 30s timeout. Outstanding:
+   and the bound is the cancel rather than the 30s timeout.
+   **The seek path does not call it yet** — `TrackPlayback.start(atFrame:)`
+   seeks the reader directly while the producer may be parked inside a read on
+   its own queue, so the mechanism is right and unused. Wiring it is the next
+   piece and is a threading change rather than a line: the seek has to cancel,
+   wait for the producer to unwind, then resume. Also outstanding:
    time-to-first-sample, which still wants a real server rather than a stub.
 4. **Two nodes at 44.1 and 96 crossfaded through the mixer**, on device and
    over Bluetooth. Decide mixer SRC versus `AVAudioConverter` by listening.
