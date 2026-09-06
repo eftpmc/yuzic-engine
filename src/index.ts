@@ -1,3 +1,4 @@
+export { YuzicEngine } from './YuzicEngine';
 export type { AudioEngine, EngineSetupOptions, RemoteCommand } from './AudioEngine';
 export type {
   BrowseNode,
@@ -11,5 +12,7 @@ export type {
   Progress,
   RepeatMode,
   ReplayGainMode,
+  ReplayGainOptions,
+  SampleRateMode,
   Track,
 } from './types';

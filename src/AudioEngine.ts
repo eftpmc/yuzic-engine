@@ -9,7 +9,8 @@ import type {
   PlaybackState,
   Progress,
   RepeatMode,
-  ReplayGainMode,
+  ReplayGainOptions,
+  SampleRateMode,
   Track,
 } from './types';
 
@@ -90,11 +91,18 @@ export interface AudioEngine {
   setEqualizer(bands: EqBand[]): Promise<void>;
 
   /**
-   * Needs `replayGainDb` on the tracks. In `album` mode the engine uses the
-   * album figure where the host supplied one, so a record mastered quiet stays
-   * quiet relative to itself.
+   * Needs `replayGainDb` on the tracks — the engine reads tags and never
+   * computes loudness itself, because computing it means decoding a whole
+   * track before it can play.
    */
-  setReplayGain(mode: ReplayGainMode): Promise<void>;
+  setReplayGain(options: ReplayGainOptions): Promise<void>;
+
+  /**
+   * Turning this to `match-source` disables crossfade, because overlapping
+   * sources have to share a sample rate. The engine reports the change rather
+   * than letting the two settings silently contradict each other.
+   */
+  setSampleRateMode(mode: SampleRateMode): Promise<void>;
 
   // ── cache ────────────────────────────────────────────────────────────────
 

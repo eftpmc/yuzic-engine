@@ -3,8 +3,8 @@
  *
  * Deliberately not modelled on any existing React Native player: those all
  * describe a queue player, and this is a graph. The differences that matter
- * show up here — `continuous`, `replayGainDb`, and the fact that a track
- * carries its own request headers.
+ * show up here — `followsPrevious`, `continuous`, the replay-gain pair, and
+ * the fact that a track carries its own request headers.
  */
 
 /** Stable identity for a track, chosen by the host. Opaque to the engine. */
@@ -36,11 +36,28 @@ export interface Track {
    */
   headers?: Record<string, string>;
   /**
-   * Track loudness in dB relative to reference, from the server's tags. Applied
-   * as gain when replay gain is on. Absent means "no information" — which is
-   * not the same as 0, and the engine treats it as such.
+   * This track was mastered to run directly out of the one before it — an
+   * album segue, a continuous mix. The engine hard-cuts instead of fading,
+   * because a crossfade across a deliberate segue doubles the overlap and
+   * sounds worse than the seam it is hiding.
+   *
+   * The host sets this; it knows album and track numbers already, which is a
+   * far better signal than digging encoder delay and padding out of LAME tags
+   * or `iTunSMPB`.
+   */
+  followsPrevious?: boolean;
+  /**
+   * Track (or album) loudness in dB relative to reference, from the server's
+   * tags. Absent means "no information" — which is not the same as 0 dB, and
+   * the engine treats the two differently: see `ReplayGainOptions.untaggedPreampDb`.
    */
   replayGainDb?: number;
+  /**
+   * Sample peak, 1.0 being full scale, from the same tags. Used to hold gain
+   * below clipping: applying a positive replay-gain figure to an already-hot
+   * master is how loudness normalisation ends up making tracks sound worse.
+   */
+  replayGainPeak?: number;
   /**
    * A stream with no meaningful end: live radio, and anything else where the
    * next track is not a thing that exists. Suppresses crossfade, gapless
@@ -73,17 +90,32 @@ export interface Progress {
 }
 
 /**
- * Crossfade is off by default, and off for `continuous` tracks whatever this
- * says. `gapless` means: overlap only where the tracks were mastered to run
- * together, and hard-cut otherwise — a crossfade across a deliberate album
- * segue sounds worse than the seam it is hiding.
+ * Off by default.
+ *
+ * Three behaviours here are not configurable because getting them wrong is
+ * always a bug, never a preference:
+ *
+ * - The fade is clamped to `min(durationSec, shorterTrack / 2)`. An eight
+ *   second fade across a three second interlude is nonsense.
+ * - The faded-out portion still counts toward the outgoing track's listened
+ *   time. Without this, a long crossfade silently stops the host ever
+ *   reaching a scrobble threshold, because position never approaches duration.
+ * - Now-playing switches at the crossover midpoint. At fade start the lock
+ *   screen names a track you can barely hear yet; at fade end it lags what you
+ *   are hearing.
  */
 export interface CrossfadeOptions {
   durationSec: number;
+  /**
+   * `gapless-aware` respects `Track.followsPrevious` and hard-cuts there.
+   * `always` fades between everything, segues included — offered because some
+   * people genuinely want it for shuffle-everything listening.
+   */
   mode: 'always' | 'gapless-aware';
   /**
-   * Skip the fade when the user skipped manually. A crossfade is for a track
-   * that ended; a skip should feel immediate.
+   * Cut rather than fade when the user pressed next. A fade is for a track
+   * that ended; a skip should feel immediate. A short ramp is still applied so
+   * the cut does not click. Default true.
    */
   skipIsImmediate?: boolean;
 }
@@ -96,7 +128,51 @@ export interface EqBand {
   q?: number;
 }
 
-export type ReplayGainMode = 'off' | 'track' | 'album';
+/**
+ * `album` preserves the dynamics within a record — the quiet interlude that is
+ * meant to be quiet stays quiet. `track` levels everything, which is what you
+ * want on shuffle and not what you want on an album.
+ *
+ * `auto` is the recommended setting and picks per queue: album mode when the
+ * queue is one album, track mode otherwise. Most players make this a global
+ * choice and are therefore wrong half the time.
+ */
+export type ReplayGainMode = 'off' | 'track' | 'album' | 'auto';
+
+export interface ReplayGainOptions {
+  mode: ReplayGainMode;
+  /** Applied on top of the tag figure, for people who want it all louder. */
+  preampDb?: number;
+  /**
+   * Applied to tracks with no tags at all. Left at 0 by default: a library
+   * where half the tracks are adjusted and half are not sounds *more* uneven
+   * than one where none are, so this exists to let a user match the two.
+   */
+  untaggedPreampDb?: number;
+  /**
+   * Hold total gain below clipping using `Track.replayGainPeak`, at the cost
+   * of not fully reaching the target loudness on hot masters. Default true —
+   * quieter than asked for beats distorted.
+   */
+  preventClipping?: boolean;
+}
+
+/**
+ * `fixed` runs the graph at one rate and converts everything into it.
+ * `match-source` reconfigures the audio session per track to play at the
+ * source's own rate.
+ *
+ * These are not equally capable, and the reason is structural: overlapping
+ * sources must share a rate, and changing the session rate requires stopping
+ * the engine. **`match-source` therefore disables crossfade**, and only takes
+ * effect at a real track boundary. The engine enforces that rather than
+ * letting the two settings quietly fight.
+ *
+ * Worth knowing before choosing: iOS hardware commonly runs at 48kHz and
+ * Bluetooth imposes its own rate regardless, so `match-source` is only
+ * meaningful over wired output or a USB DAC.
+ */
+export type SampleRateMode = 'fixed' | 'match-source';
 
 export interface CacheOptions {
   maxBytes: number;
@@ -128,7 +204,13 @@ export interface BrowseNode {
 
 export type EngineEvent =
   | { type: 'stateChange'; state: PlaybackState }
-  | { type: 'trackChange'; index: number; id: MediaId | null }
+  /**
+   * Fired at the crossover midpoint when crossfading, so it lines up with
+   * what the listener is actually hearing. `listenedSec` is the outgoing
+   * track's played time *including* its fade-out, which is what a scrobble
+   * threshold has to be measured against.
+   */
+  | { type: 'trackChange'; index: number; id: MediaId | null; previousListenedSec?: number }
   | { type: 'progress'; progress: Progress }
   | { type: 'queueChange' }
   | { type: 'error'; code: string; message: string; id?: MediaId }

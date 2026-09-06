@@ -1,0 +1,9 @@
+{
+  "platforms": ["ios", "android"],
+  "ios": {
+    "modules": ["YuzicEngineModule"]
+  },
+  "android": {
+    "modules": ["dev.yuzic.engine.YuzicEngineModule"]
+  }
+}
