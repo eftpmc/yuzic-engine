@@ -11,11 +11,11 @@
   "types": "lib/index.d.ts",
   "source": "src/index.ts",
   "files": [
-    "src",
-    "lib",
+    "expo-module.config.json",
     "ios",
     "android",
-    "*.podspec",
+    "lib",
+    "src",
     "LICENSE",
     "NOTICE",
     "README.md"
