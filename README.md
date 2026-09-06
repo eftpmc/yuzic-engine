@@ -94,13 +94,44 @@ Reasoning for each is in [docs/architecture.md](docs/architecture.md).
 
 ## Still open
 
-- **Bridge**: Nitro (already a yuzic dependency) vs the Expo Modules API
-  (better config-plugin ergonomics, and the plugin work is needed either way).
-  Leaning Nitro.
 - **Gapless detection**: encoder delay/padding metadata, or the host's word.
-- **Hi-res**: switch the graph's sample rate to match the source, or resample.
-  Constrains the mixer, so it wants deciding before the mixer is built.
-- **The iOS cache is the biggest unknown** and deserves a spike before the rest
-  of the iOS work: `AVAssetResourceLoader` with manual range handling, a local
-  proxy, or a plain ranged fetcher of our own. Android gets this close to free
-  from Media3.
+- **Android**: the shape is decided (Media3 gives most of this close to free)
+  but nothing has been compiled yet.
+- **Replay gain application**: the tags are carried on `Track` and honoured by
+  the queue; the per-track gain is not yet applied to the graph.
+
+## Settled by building
+
+These were open questions in the first draft of this file. Each was answered by
+writing the thing and running it, not by deciding harder — the reasoning is in
+[docs/architecture.md](docs/architecture.md).
+
+- **Bridge: Expo Modules.** The config-plugin ergonomics turned out to be the
+  whole argument; see `app.plugin.js`, which is doing more than expected.
+- **The cache: a ranged fetcher of our own.** `AVAssetResourceLoader` was the
+  obvious candidate and the spike killed it. `spikes/ios-reader/` has the
+  measurements, including the one that mattered: a 90% seek into a FLAC pulls
+  177% of the file, because libFLAC's seek is architecturally a scan.
+- **Hi-res: the host chooses, and the engine enforces.** `setSampleRateMode`
+  turns crossfade off when set to `match-source` and says so, because
+  overlapping sources have to share a hardware rate. Two settings that silently
+  contradict each other would have been the worse answer.
+
+## CarPlay
+
+The engine draws the car's screen from a tree the host pushes down in advance,
+because the car asks while the app's JavaScript is asleep. `setBrowseTree` takes
+an ordinary nested tree; selection is resolved and played natively, and the host
+finds out through the usual track-change event.
+
+Two things the config plugin cannot do for you:
+
+1. **The `com.apple.developer.carplay-audio` entitlement is granted by Apple,
+   per app**, on request. Until it is, none of this appears in a car — and
+   nothing logs to say why. The plugin deliberately does not fabricate the
+   entitlement, because that trades a clear message for a signing failure.
+2. **yuzic commits its `ios/` directory**, so the plugin's Info.plist changes
+   only land on a prebuild.
+
+To try it without a car: Xcode's Simulator has **I/O → External Displays →
+CarPlay**, which needs the entitlement the same way a real head unit does.
