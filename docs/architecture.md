@@ -319,17 +319,30 @@ What this does not change: the callback reader, the cache, the range
 bookkeeping, and everything the spike proved are all still right for the direct
 path, which is the one that carries lossless playback and offline downloads.
 
-What it adds, and what is not built yet:
+What it adds, now built as `StreamingByteSource`:
 
-- A **length-unknown, append-only** mode for the cache. Bytes still land on
-  disk, so seeking *backwards* and anywhere already downloaded stays free; only
-  a seek past the write head has to wait or restart.
-- A **restart-at-timeOffset** path for a forward seek beyond what has landed,
-  which discards the current stream and opens a new one.
-- A size estimate for `GetSizeProc` while the true one is unknown. Track
-  duration and the requested bitrate are both known to the host, so
-  `duration × bitrate` is available and close — but a wrong answer here misleads
-  the parser, so this wants care rather than a guess.
+- **Length-unknown, append-only.** Every byte that arrives is kept, so seeking
+  backwards or anywhere already received is ordinary random access; only a read
+  ahead of the write head waits, which is the normal case for a reader running
+  slightly ahead of a download.
+- **`GetSizeProc` answers an estimate** until the stream ends, then the true
+  size. It has to answer *something* — the parser asks before any bytes arrive.
+  `duration × bitrate` is what the host knows. Erring high is deliberate:
+  reading past the real end returns nothing, which the parser treats as
+  end-of-file, whereas under-reporting truncates the track.
+- **A forward seek past the write head is a reconnection, not a read.**
+  `streamURL(base:timeOffsetSeconds:)` builds the new request; the layer above
+  replaces the source and reopens the reader, because the new stream's byte
+  offsets have nothing to do with the old one's. Deliberately not smuggled into
+  the source, which would make a seek look cheap when it costs a round trip and
+  a rebuffer.
+
+That last cost is accepted rather than hidden. Someone who set a bitrate cap
+chose it, and a slower seek is the honest consequence — better than quietly
+pulling the lossless original over cellular to make seeking feel nicer.
+
+`AudioFileReader` takes a `ByteSource` rather than either concrete type, so it
+does not know or care which transport it is reading.
 
 The alternative — always source the cache from `/rest/download`, which is the
 raw file and seekable — trades a user's deliberate bandwidth choice for

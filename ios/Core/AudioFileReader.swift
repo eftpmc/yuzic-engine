@@ -18,6 +18,10 @@ import AudioToolbox
  proc is handed offsets rather than a cursor, and the source blocks until the
  bytes arrive.
 
+ Takes any `ByteSource`, because there are two transports: a ranged direct
+ stream, and a transcoded one that can only serve what has arrived. The reader
+ does not care which — it asks for bytes and either gets them or waits.
+
  Not thread-safe: one reader per producer thread, which is the shape the design
  wants anyway.
  */
@@ -30,7 +34,7 @@ public final class AudioFileReader {
     case readFailed(OSStatus)
   }
 
-  private let source: CachedByteSource
+  private let source: ByteSource
   private var audioFile: AudioFileID?
   private var extFile: ExtAudioFileRef?
 
@@ -43,7 +47,7 @@ public final class AudioFileReader {
   /// `AVAudioPlayerNode` wants and what the graph is wired for.
   public private(set) var outputFormat: AVAudioFormat?
 
-  public init(source: CachedByteSource) {
+  public init(source: ByteSource) {
     self.source = source
   }
 
