@@ -74,6 +74,52 @@ fine but cannot seek, M4A seeks perfectly but cannot start:
    proc is random-access already, so it is a prefetch heuristic, not a
    redesign. Roughly the last 64KB before the head.
 
+## Spike item 6: what a real server does with `Range`
+
+Measured against `demo.navidrome.org`, September 2026, on an 18MB m4a track.
+
+**Direct stream** — `/rest/stream.view?id=…` with no quality parameters:
+
+```
+HTTP/2 206
+accept-ranges: bytes
+content-range: bytes 0-0/18389560
+```
+
+Ranges fully supported, length known. Everything above works.
+
+**Transcoded stream** — the same URL with `&maxBitRate=128&format=mp3`:
+
+```
+HTTP/2 200
+accept-ranges: none
+(no content-length at all)
+```
+
+Not merely "ranges ignored". The server says outright that it does not accept
+them, and declines to state a length, because it is producing the bytes as it
+sends them and does not know yet.
+
+**Seeking in that mode is a different mechanism entirely.** Subsonic's answer is
+`timeOffset`, and it works — re-requesting with `&timeOffset=60` returns a
+different first 2KB, so the server restarts the encode sixty seconds in.
+
+So there are two transports, not one:
+
+| | direct | transcoded |
+| --- | --- | --- |
+| ranges | yes | no, explicitly |
+| length up front | yes | no |
+| seeking | byte range | re-request with `timeOffset` |
+| random access | yes | no — a fresh stream per seek |
+
+**Which one you get is decided by the app's own quality setting.** yuzic asks
+for `format`/`maxBitRate` on everything except Original, and that choice is made
+per network — so the same track is randomly-accessible on WiFi at Original and
+a forward-only stream on cellular at 192kbps. The reader cannot assume either.
+
+The consequence for this design is in `docs/architecture.md` §10.
+
 ## Caveats
 
 - Measured on macOS, not on an iOS device. The frameworks are shared and the

@@ -1,7 +1,7 @@
 # Architecture
 
-Nine decisions, taken before the native code went in, each with the reason it
-went that way. Anything that contradicts one of these is either a mistake or
+Ten decisions, each with the reason it went that way. The later ones came out
+of measurement rather than design, which is why they read differently. Anything that contradicts one of these is either a mistake or
 a decision to revisit here first.
 
 ## 1. A graph, not a queue player
@@ -285,6 +285,56 @@ MP3, AAC/M4A, ALAC and WAV, where seeking is targeted.
 Still unconfirmed on an iOS device: the frameworks are shared and the original
 report was also macOS, but nobody has run it on the phone yet.
 
+## 10. Transcoded streams are a second transport, not a variation
+
+Measured, not assumed — see `spikes/ios-reader`. Against a real Navidrome, a
+direct stream answers `206` with `accept-ranges: bytes` and a full
+`content-range`. The same track requested with `maxBitRate` and `format`
+answers `200`, `accept-ranges: none`, **and no content-length at all**, because
+the server is producing bytes as it sends them.
+
+Everything in §2 rests on two things a transcoded stream refuses to provide: a
+known total size, and random access. `GetSizeProc` has nothing truthful to
+answer, and an offset does not address a stable resource.
+
+Subsonic's own seek mechanism for this case is `timeOffset` — re-request the
+stream starting *n* seconds in, confirmed working on the demo server. That is a
+fresh byte stream per seek, not a window into one file.
+
+So there are two transports:
+
+| | direct | transcoded |
+| --- | --- | --- |
+| ranges | yes | no, explicitly refused |
+| length up front | yes | no |
+| seeking | byte range | re-request with `timeOffset` |
+
+**And the app chooses between them without meaning to.** yuzic sends
+`format`/`maxBitRate` for every quality except Original, and that setting is
+per-network — so the same track is randomly accessible on WiFi at Original and
+forward-only on cellular at 192kbps. Neither the reader nor the cache may
+assume which one it has.
+
+What this does not change: the callback reader, the cache, the range
+bookkeeping, and everything the spike proved are all still right for the direct
+path, which is the one that carries lossless playback and offline downloads.
+
+What it adds, and what is not built yet:
+
+- A **length-unknown, append-only** mode for the cache. Bytes still land on
+  disk, so seeking *backwards* and anywhere already downloaded stays free; only
+  a seek past the write head has to wait or restart.
+- A **restart-at-timeOffset** path for a forward seek beyond what has landed,
+  which discards the current stream and opens a new one.
+- A size estimate for `GetSizeProc` while the true one is unknown. Track
+  duration and the requested bitrate are both known to the host, so
+  `duration × bitrate` is available and close — but a wrong answer here misleads
+  the parser, so this wants care rather than a guess.
+
+The alternative — always source the cache from `/rest/download`, which is the
+raw file and seekable — trades a user's deliberate bandwidth choice for
+seekability, and on cellular that is not ours to make.
+
 ## What is not decided yet
 
 The architecture above is settled. What remains is empirical, and there is a
@@ -306,9 +356,10 @@ go/no-go:
    over Bluetooth. Decide mixer SRC versus `AVAudioConverter` by listening.
 5. **Configuration-change survival**: pull the route mid-crossfade, confirm the
    rebuild resumes at the right frame with nothing repeated or dropped.
-6. **Against real servers**: does Navidrome's `/rest/stream` honour `Range` and
-   send `Content-Length` when it is transcoding on the fly? If not, the cache
-   sources from `/rest/download` instead. Verify rather than assume.
+6. ~~Against real servers: does `/rest/stream` honour `Range` when
+   transcoding?~~ **Done — no.** Direct streams are fully ranged; transcoded
+   ones answer `accept-ranges: none` with no length, and seek via `timeOffset`.
+   See §10; this needs a second transport, not a tweak.
 7. **Thermal and battery** with two hi-res decoders live during a crossfade.
 
 If (2) fails for a given format, that format falls back to fetch-to-complete —
