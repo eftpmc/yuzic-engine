@@ -95,23 +95,24 @@ Reasoning for each is in [docs/architecture.md](docs/architecture.md).
 ## Still open
 
 - **Gapless detection**: encoder delay/padding metadata, or the host's word.
-- **Android is half a bridge.** It compiles now — it did not before, and the
-  three errors were the kind only a compiler finds: a companion property read
-  above its own initialiser, a `this.graph` that resolved to the service rather
-  than the companion, and a smart cast the compiler refused for a reason that
-  is real at runtime.
+- **Android has never run.** It compiles — it did not before, and the three
+  errors were the kind only a compiler finds. Both platforms now declare the
+  same twenty-four functions, checked by comparing the two modules rather than
+  by reading them, because the module's own header calls a divergence here the
+  worst kind of bug to find.
 
-  What it does not have is the other half of the JS surface. Twelve of iOS's
-  twenty-four functions are missing: `seekTo`, `stop`, `skipToNext`,
-  `skipToPrevious`, `skipToIndex`, `setVolume`, `getProgress`, `getState`,
-  `sleepAfter`, `cancelSleep`, `setReplayGain`, `clearBrowseTree`. So Android
-  can set a queue and play or pause it, and cannot seek, skip, stop, or answer
-  where it has got to.
+  Compiling is the whole of the evidence. There is no Kotlin test target and
+  nothing has been on a device or an emulator, so every behaviour below the
+  type checker is unverified — including three things that were wrong on
+  inspection and may have company: every player call was being made from Expo's
+  background dispatcher, which ExoPlayer rejects outright; the queue's active
+  index did not follow the player's; and replay gain had no channel to be
+  applied through.
 
-  The capability is mostly there a layer down — `EnginePlayer` already
-  implements `seekTo`, `stop`, position, duration and buffered position. The
-  gap is the bridge, not the engine, which makes this translation work rather
-  than design work.
+  The next real gate is not more surface, it is **events**. `onProgress`,
+  `onStateChange` and `onTrackChange` are declared and nothing emits them —
+  only `onRemoteCommand` is wired. A host on Android can ask where it is but
+  will never be told.
 - **Seek cost, measured**: a seek now abandons the request it was waiting on
   promptly rather than at the HTTP timeout, but time-to-first-sample into an
   unfetched region has still never been timed end to end. See open question 3.

@@ -144,14 +144,14 @@ class YuzicEngineModule : Module() {
      * [AudioGraph.Voice] exists to keep.
      */
     AsyncFunction("setVolume") { volume: Double ->
-      val clamped = volume.coerceIn(0.0, 1.0).toFloat()
-      onMain {
-        PlaybackService.graph?.let {
-          it.voiceA.player.volume = clamped
-          it.voiceB.player.volume = clamped
-        }
-      }
+      userVolume = volume.coerceIn(0.0, 1.0).toFloat()
+      onMain { applyVolume() }
     }
+
+    // MARK: sleep timer
+
+    AsyncFunction("sleepAfter") { seconds: Double -> sleepTimer.schedule(seconds) }
+    AsyncFunction("cancelSleep") { sleepTimer.cancel() }
 
     // MARK: reading the state, rather than waiting to be told
 
@@ -189,6 +189,24 @@ class YuzicEngineModule : Module() {
           )
         }
       )
+    }
+
+    /**
+     * Loudness normalisation, from the host's tags.
+     *
+     * Folded into the player's volume together with the user's setting, because
+     * both are static multipliers and there is only one channel free — the fade
+     * processor is the crossfade's and must stay that way. Recomputed on the
+     * active track whenever either half changes.
+     */
+    AsyncFunction("setReplayGain") { options: ReplayGainRecord ->
+      replayGain = ReplayGainSettings(
+        mode = ReplayGainMode.from(options.mode),
+        preampDb = options.preampDb,
+        untaggedPreampDb = options.untaggedPreampDb,
+        preventClipping = options.preventClipping,
+      )
+      onMain { applyVolume() }
     }
 
     AsyncFunction("setCrossfade") { options: CrossfadeRecord? ->
@@ -257,6 +275,37 @@ class YuzicEngineModule : Module() {
 
   private val main = Handler(Looper.getMainLooper())
 
+  /**
+   * The two static multipliers that share `ExoPlayer.volume`.
+   *
+   * Held here rather than read back off the player, because the product of the
+   * pair is what the player stores — asking it for the volume would give the
+   * product and there would be no way to change one without inventing the
+   * other.
+   */
+  private var userVolume: Float = 1.0f
+  private var replayGain: ReplayGainSettings = ReplayGainSettings.OFF
+
+  /**
+   * Fade the music out, then pause — not the other way round, and not a cut.
+   *
+   * Music stopping mid-bar is the thing that wakes people, which defeats the
+   * whole feature. The pause is scheduled for the end of the fade rather than
+   * chained to a completion callback because `FadeAudioProcessor` has none: it
+   * ramps in the audio thread and nothing tells anyone when it arrives.
+   */
+  private val sleepTimer = SleepTimer { fadeSeconds ->
+    val graph = PlaybackService.graph ?: return@SleepTimer
+    graph.ramp(graph.activeVoice, 0f, fadeSeconds)
+    main.postDelayed({
+      graph.activeVoice.player.pause()
+      // Put the fade back where it was found. Without this, pressing play the
+      // next morning starts a track at zero gain and looks like a dead player
+      // — the same bug the iOS engine calls out at PlaybackEngine.swift:163.
+      graph.ramp(graph.activeVoice, 1f, 0.0)
+    }, (fadeSeconds * 1000).toLong())
+  }
+
   /** Fire-and-forget onto the active voice. Does nothing before `setup`. */
   private fun onPlayer(block: (ExoPlayer) -> Unit) {
     onMain { PlaybackService.graph?.activeVoice?.player?.let(block) }
@@ -315,6 +364,21 @@ class YuzicEngineModule : Module() {
    * itself. Without this the two disagree the moment anyone presses next, and
    * the crossfade rules start reasoning about the wrong pair of tracks.
    */
+  /**
+   * Push `user volume × the active track's replay gain` to both players.
+   *
+   * Both, because during a crossfade two of them are audible and leaving one
+   * behind makes the change lurch halfway through the fade. Main thread only.
+   */
+  private fun applyVolume() {
+    val graph = PlaybackService.graph ?: return
+    val track = queue.activeTrack
+    val gain = if (track == null) 1.0f else ReplayGain.linearGain(track, replayGain)
+    val level = userVolume * gain
+    graph.voiceA.player.volume = level
+    graph.voiceB.player.volume = level
+  }
+
   private fun syncActiveIndexFrom(player: ExoPlayer) {
     val index = player.currentMediaItemIndex
     if (index in queue.tracks.indices && index != queue.activeIndex) {
@@ -361,11 +425,16 @@ class YuzicEngineModule : Module() {
    * would have it advancing through the queue in parallel — two playheads on the
    * same list, which is not what the pair is for.
    */
-  private fun pushQueueToPlayer() {
-    val graph = PlaybackService.graph ?: return
+  private fun pushQueueToPlayer() = onMain {
+    val graph = PlaybackService.graph ?: return@onMain
     val player = graph.activeVoice.player
     player.setMediaItems(queue.tracks.map { it.toMediaItem() }, queue.activeIndex, 0L)
     player.prepare()
+    // The active track changed, so its replay gain did too. Set before anything
+    // is audible rather than after: a track arriving at the wrong loudness and
+    // being corrected a moment later is exactly what the feature is meant to
+    // prevent.
+    applyVolume()
   }
 }
 
@@ -403,6 +472,13 @@ class EqBandRecord : Record {
   @Field var frequencyHz: Double = 0.0
   @Field var gainDb: Double = 0.0
   @Field var q: Double? = null
+}
+
+class ReplayGainRecord : Record {
+  @Field var mode: String = "off"
+  @Field var preampDb: Double = 0.0
+  @Field var untaggedPreampDb: Double = 0.0
+  @Field var preventClipping: Boolean = true
 }
 
 class CrossfadeRecord : Record {
