@@ -1,5 +1,6 @@
 import ExpoModulesCore
 import AVFoundation
+import YuzicEngineCore
 
 /**
  The Expo module surface — the thin part. Everything of substance lives in
@@ -44,12 +45,12 @@ public final class YuzicEngineModule: Module {
     // has to update, and the car still has to answer its buttons.
 
     AsyncFunction("setQueue") { (tracks: [TrackRecord], startIndex: Int?) in
-      self.queue.set(tracks, startIndex: startIndex ?? 0)
+      self.queue.set(tracks.map(\.asTrack), startIndex: startIndex ?? 0)
       self.sendEvent("onQueueChange", [:])
     }
 
     AsyncFunction("append") { (tracks: [TrackRecord]) in
-      self.queue.append(tracks)
+      self.queue.append(tracks.map(\.asTrack))
       self.sendEvent("onQueueChange", [:])
     }
 
@@ -71,22 +72,24 @@ public final class YuzicEngineModule: Module {
     }
 
     AsyncFunction("setCrossfade") { (options: CrossfadeRecord?) in
-      self.queue.crossfade = options
+      self.queue.crossfade = options?.asSettings
     }
 
     AsyncFunction("setSampleRateMode") { (mode: String) in
-      // Enforced rather than merely recorded: overlapping sources have to share
-      // a rate, so matching the source and crossfading are mutually exclusive.
-      // The engine resolves the contradiction instead of leaving two settings
-      // to fight, and tells the host it did.
-      if mode == "match-source", self.queue.crossfade != nil {
+      // Enforced rather than merely recorded. Overlapping sources may differ in
+      // rate — the mixer converts — but the *hardware* rate cannot change
+      // mid-fade without stopping the engine and discarding every scheduled
+      // buffer, so bit-perfect output and a crossfade in progress cannot
+      // coexist. Resolved here rather than left as two settings that fight.
+      let resolved = SampleRateMode(rawValue: mode) ?? .fixed
+      if resolved == .matchSource, self.queue.crossfade != nil {
         self.queue.crossfade = nil
         self.sendEvent("onError", [
           "code": "CROSSFADE_DISABLED",
-          "message": "Crossfade turned off: matching the source sample rate cannot overlap two tracks.",
+          "message": "Crossfade turned off: the hardware sample rate cannot change mid-fade.",
         ])
       }
-      self.queue.sampleRateMode = mode
+      self.queue.sampleRateMode = resolved
     }
   }
 
@@ -138,4 +141,42 @@ struct CrossfadeRecord: Record {
   @Field var durationSec: Double = 0
   @Field var mode: String = "gapless-aware"
   @Field var skipIsImmediate: Bool = true
+}
+
+
+// MARK: - Bridge → domain
+//
+// The conversion happens here and nowhere else. Below this line everything is
+// plain Swift that `swift test` can build without ExpoModulesCore — which is
+// the only reason the queue rules have tests at all.
+
+extension TrackRecord {
+  var asTrack: Track {
+    Track(
+      id: id,
+      uri: uri,
+      title: title,
+      artist: artist,
+      album: album,
+      artworkUri: artworkUri,
+      durationSec: durationSec,
+      headers: headers ?? [:],
+      followsPrevious: followsPrevious,
+      replayGainDb: replayGainDb,
+      replayGainPeak: replayGainPeak,
+      continuous: continuous
+    )
+  }
+}
+
+extension CrossfadeRecord {
+  var asSettings: CrossfadeSettings {
+    CrossfadeSettings(
+      durationSec: durationSec,
+      // An unrecognised mode falls back to the safer of the two: fading
+      // through a deliberate segue is the outcome people notice and dislike.
+      mode: CrossfadeMode(rawValue: mode) ?? .gaplessAware,
+      skipIsImmediate: skipIsImmediate
+    )
+  }
 }

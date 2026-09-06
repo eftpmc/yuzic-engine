@@ -21,3 +21,8 @@ tone.wav
 tone.flac
 tone.m4a
 tone.mp3
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved

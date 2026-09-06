@@ -7,29 +7,34 @@ import Foundation
  app is backgrounded its JavaScript stops, and the transition still has to
  happen. Anything decided up in JS is a decision that will one day not get made,
  usually in a car.
+
+ `src/transitionDuration.ts` is the specification these rules answer to, and
+ `Tests/CoreTests` runs the same table of cases against this implementation.
  */
-final class PlaybackQueue {
+public final class PlaybackQueue {
 
-  private(set) var tracks: [TrackRecord] = []
-  private(set) var activeIndex: Int = 0
+  public private(set) var tracks: [Track] = []
+  public private(set) var activeIndex: Int = 0
 
-  var crossfade: CrossfadeRecord?
-  var sampleRateMode: String = "fixed"
+  public var crossfade: CrossfadeSettings?
+  public var sampleRateMode: SampleRateMode = .fixed
 
-  func set(_ tracks: [TrackRecord], startIndex: Int) {
+  public init() {}
+
+  public func set(_ tracks: [Track], startIndex: Int) {
     self.tracks = tracks
     self.activeIndex = max(0, min(startIndex, max(0, tracks.count - 1)))
   }
 
-  func append(_ more: [TrackRecord]) {
+  public func append(_ more: [Track]) {
     tracks.append(contentsOf: more)
   }
 
-  var activeTrack: TrackRecord? {
+  public var activeTrack: Track? {
     tracks.indices.contains(activeIndex) ? tracks[activeIndex] : nil
   }
 
-  var nextTrack: TrackRecord? {
+  public var nextTrack: Track? {
     let next = activeIndex + 1
     return tracks.indices.contains(next) ? tracks[next] : nil
   }
@@ -51,15 +56,30 @@ final class PlaybackQueue {
    - The fade is clamped to half the shorter track. An eight second crossfade
      across a three second interlude would consume the whole thing.
    */
-  func transitionDuration(userInitiated: Bool) -> TimeInterval {
+  public func transitionDuration(userInitiated: Bool) -> TimeInterval {
+    transitionDuration(from: activeTrack, to: nextTrack, userInitiated: userInitiated)
+  }
+
+  /// Exposed separately so the rules can be exercised without standing a queue
+  /// up around them — the conformance table drives this form directly.
+  public func transitionDuration(
+    from current: Track?,
+    to next: Track?,
+    userInitiated: Bool
+  ) -> TimeInterval {
     guard let crossfade, crossfade.durationSec > 0 else { return 0 }
-    guard let current = activeTrack, !current.continuous else { return 0 }
-    guard let next = nextTrack, !next.continuous else { return 0 }
+    guard let current, !current.continuous else { return 0 }
+    guard let next, !next.continuous else { return 0 }
 
     if userInitiated && crossfade.skipIsImmediate { return 0 }
-    if crossfade.mode == "gapless-aware" && next.followsPrevious { return 0 }
+    if crossfade.mode == .gaplessAware && next.followsPrevious { return 0 }
 
-    let shortest = min(current.durationSec ?? .infinity, next.durationSec ?? .infinity)
+    // An absent duration means "the host does not know yet", not "zero", so it
+    // must not clamp the fade away.
+    let shortest = min(
+      current.durationSec ?? .infinity,
+      next.durationSec ?? .infinity
+    )
     guard shortest.isFinite else { return crossfade.durationSec }
     return min(crossfade.durationSec, shortest / 2)
   }
