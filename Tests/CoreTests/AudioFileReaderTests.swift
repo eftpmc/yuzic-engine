@@ -104,6 +104,54 @@ final class AudioFileReaderTests: XCTestCase {
     XCTAssertEqual(buffer.format.channelCount, 2)
   }
 
+  // MARK: - Buffered-ahead estimate
+
+  /**
+   What the buffering indicator is drawn from.
+
+   Only ever used for display — never for scheduling, the crossfade trigger or
+   end-of-track — which is what licenses the crude frames-to-bytes assumption
+   underneath. These tests pin the properties a bar actually needs: that it
+   reports something when bytes are present, nothing when they are not, and
+   never more than exists.
+   */
+  func testReportsSomethingBufferedOnceBytesAreFetched() throws {
+    let data = try fixture(format: kAudioFormatLinearPCM, ext: "wav")
+    let (reader, _) = try read(data, window: 64 * 1024)
+    _ = try reader.read(frames: 4096)
+
+    // The failure this replaces was reporting zero forever, which makes a
+    // buffering bar indistinguishable from a stalled one.
+    XCTAssertGreaterThan(reader.bufferedFramesAhead(ofFrame: 0), 0)
+  }
+
+  func testNeverClaimsMoreThanTheFileHolds() throws {
+    let data = try fixture(format: kAudioFormatLinearPCM, ext: "wav")
+    let (reader, _) = try read(data, window: 64 * 1024)
+    _ = try reader.read(frames: 4096)
+
+    XCTAssertLessThanOrEqual(reader.bufferedFramesAhead(ofFrame: 0), reader.totalFrames)
+  }
+
+  func testReportsNothingBufferedBeyondTheEnd() throws {
+    let data = try fixture(format: kAudioFormatLinearPCM, ext: "wav")
+    let (reader, _) = try read(data, window: 64 * 1024)
+    _ = try reader.read(frames: 4096)
+
+    XCTAssertEqual(reader.bufferedFramesAhead(ofFrame: reader.totalFrames), 0)
+  }
+
+  func testReportsNothingBufferedFarAheadOfWhatWasFetched() throws {
+    // A small window means a seek to the far end has nothing waiting, and the
+    // bar should say so rather than inheriting the figure from the head.
+    let data = try fixture(format: kAudioFormatLinearPCM, ext: "wav")
+    let (reader, _) = try read(data, window: 16 * 1024)
+    _ = try reader.read(frames: 4096)
+
+    let nearTheEnd = Int64(Double(reader.totalFrames) * 0.9)
+    XCTAssertEqual(reader.bufferedFramesAhead(ofFrame: nearTheEnd), 0)
+  }
+
   func testReportsFullDurationWithAlmostNothingFetched() throws {
     let data = try fixture(format: kAudioFormatLinearPCM, ext: "wav")
     let (reader, fetcher) = try read(data, window: 16 * 1024)

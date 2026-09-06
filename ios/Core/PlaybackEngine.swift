@@ -30,7 +30,7 @@ public final class PlaybackEngine {
     /// scrobbling on "half the track" needs that, or a long crossfade silently
     /// stops it ever reaching the threshold.
     case trackChanged(index: Int, id: MediaId?, previousListenedSec: Double?)
-    case progress(positionSec: Double, durationSec: Double)
+    case progress(positionSec: Double, durationSec: Double, bufferedSec: Double)
     case ended
     case failed(String)
   }
@@ -293,23 +293,30 @@ public final class PlaybackEngine {
    until the next tick. Cheap enough to ask directly, and it reads the same
    values the tick emits rather than a cached copy that could disagree.
    */
-  public var progress: (positionSec: Double, durationSec: Double) {
+  public var progress: (positionSec: Double, durationSec: Double, bufferedSec: Double) {
     guard let playback = activePlayback, let reader = activeReader, reader.sampleRate > 0 else {
-      return (0, 0)
+      return (0, 0, 0)
     }
+    let frame = playback.currentFrame
+    let position = Double(frame) / reader.sampleRate
     return (
-      Double(playback.currentFrame) / reader.sampleRate,
+      position,
       // A live stream has no finish line, and reporting the bytes fetched so
       // far as a duration draws a progress bar that lies.
-      queue.activeTrack?.continuous == true ? 0 : Double(reader.totalFrames) / reader.sampleRate
+      queue.activeTrack?.continuous == true ? 0 : Double(reader.totalFrames) / reader.sampleRate,
+      // Absolute, not relative: a buffering bar is drawn against the same
+      // timeline as the position, so a figure measured from the playhead would
+      // sit at the wrong end of it.
+      position + Double(reader.bufferedFramesAhead(ofFrame: frame)) / reader.sampleRate
     )
   }
 
   private func tick() {
     guard let playback = activePlayback, let reader = activeReader, reader.sampleRate > 0 else { return }
-    let position = Double(playback.currentFrame) / reader.sampleRate
-    let duration = Double(reader.totalFrames) / reader.sampleRate
-    emit(.progress(positionSec: position, durationSec: duration))
+    // Read once, through the same accessor `getProgress` uses, so the event
+    // and the answer to a direct question cannot drift apart.
+    let (position, duration, buffered) = progress
+    emit(.progress(positionSec: position, durationSec: duration, bufferedSec: buffered))
 
     guard !transitioning else { return }
     let fade = queue.transitionDuration(userInitiated: false)

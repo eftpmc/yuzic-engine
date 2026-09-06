@@ -92,14 +92,11 @@ public final class YuzicEngineModule: Module {
      has just mounted mid-track — it would show zero until the next tick.
      */
     AsyncFunction("getProgress") { () -> [String: Any] in
-      let progress = self.engine?.progress ?? (positionSec: 0, durationSec: 0)
+      let progress = self.engine?.progress ?? (positionSec: 0, durationSec: 0, bufferedSec: 0)
       return [
         "positionSec": progress.positionSec,
         "durationSec": progress.durationSec,
-        // Not yet measured: the cache knows what it has fetched, but nothing
-        // reports it upward. Zero rather than a guess, so a buffering bar shows
-        // nothing rather than something wrong.
-        "bufferedSec": 0,
+        "bufferedSec": progress.bufferedSec,
       ]
     }
 
@@ -218,8 +215,10 @@ public final class YuzicEngineModule: Module {
       if let id { payload["id"] = id }
       if let listened { payload["previousListenedSec"] = listened }
       sendEvent("onTrackChange", payload)
-    case .progress(let position, let duration):
-      sendEvent("onProgress", ["positionSec": position, "durationSec": duration])
+    case .progress(let position, let duration, let buffered):
+      sendEvent("onProgress", [
+        "positionSec": position, "durationSec": duration, "bufferedSec": buffered,
+      ])
     case .ended:
       sendEvent("onStateChange", ["state": "ended"])
     case .failed(let message):

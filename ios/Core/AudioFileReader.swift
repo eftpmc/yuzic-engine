@@ -121,6 +121,35 @@ public final class AudioFileReader {
     totalFrames = frames
   }
 
+  /**
+   How many frames beyond `frame` are already fetched.
+
+   An estimate, and deliberately a crude one: it maps frames to bytes by
+   assuming a constant rate across the file. That is exact for PCM, close for
+   CBR, and wrong in the middle of a VBR file — a quiet passage occupies fewer
+   bytes than a loud one, so the figure drifts either way.
+
+   Good enough because of what it is for. This drives a buffering indicator, a
+   thing whose only job is to distinguish "stalled" from "fine". Being ten
+   percent out on how much is buffered changes nothing anyone can see; being
+   unable to say whether anything is buffered at all is the failure worth
+   avoiding, and the alternative on offer was reporting zero forever.
+
+   Never used for a decision — not for scheduling, not for the crossfade
+   trigger, not for end-of-track. Only for display.
+   */
+  public func bufferedFramesAhead(ofFrame frame: Int64) -> Int64 {
+    guard totalFrames > 0, let totalBytes = try? source.totalBytes(), totalBytes > 0 else {
+      return 0
+    }
+    let bytesPerFrame = Double(totalBytes) / Double(totalFrames)
+    guard bytesPerFrame > 0 else { return 0 }
+
+    let byteOffset = Int64(Double(frame) * bytesPerFrame)
+    let available = source.availableBytes(from: byteOffset)
+    return Int64(Double(available) / bytesPerFrame)
+  }
+
   public func seek(toFrame frame: Int64) throws {
     guard let extFile else { return }
     let status = ExtAudioFileSeek(extFile, frame)
