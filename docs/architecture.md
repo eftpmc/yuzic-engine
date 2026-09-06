@@ -348,6 +348,51 @@ The alternative — always source the cache from `/rest/download`, which is the
 raw file and seekable — trades a user's deliberate bandwidth choice for
 seekability, and on cellular that is not ours to make.
 
+## 11. The car is served natively, from a tree pushed down in advance
+
+CarPlay asks for its list at the worst possible moment. The phone connects as
+someone starts driving; the app has been backgrounded for hours, and its
+JavaScript is suspended. A browse tree that has to be fetched from JS is a tree
+that is sometimes empty exactly then, and the failure looks to the driver like
+an app with an empty library.
+
+So the host pushes the tree down whenever it likes, and the native side answers
+alone — including playing the selection, which never round-trips either. The
+host learns what happened afterwards, through the ordinary track-change event.
+
+**Everything that decides anything is kept out of CarPlay's types.**
+`BrowseTree` and `CarPlayCoordinator` import Foundation and nothing else, so
+`swift test` reaches them on any Mac with no car and no phone. The scene
+delegate is left with drawing. This is the same split as `NowPlayingInfo` and
+`NowPlayingCenter`, for the same reason: the interesting decisions here are not
+about templates.
+
+The decisions worth stating:
+
+- **A track chosen inside an album queues the album and starts there**, rather
+  than playing one track and stopping. The album is the context the driver
+  believes they are in, and they cannot pick a follow-up while moving.
+- **Over-long lists truncate rather than throw.** CarPlay refuses a list past
+  its limit outright; a car showing the first hundred albums is usable, a car
+  showing an error is not.
+- **Orphaned nodes are dropped, not promoted.** A half-loaded library should
+  show less, not show a flat pile of tracks where albums were expected.
+- **Duplicate ids keep the first.** Selection resolves by id, so the
+  alternative is a car playing something other than what it displayed.
+- **A tree arriving after the car connects rebuilds the root template.**
+  Otherwise the driver has to back out and re-enter to refresh an empty list.
+
+**The tree crosses the bridge flat**, with parent references, because an Expo
+`Record` cannot contain itself. Hosts never see that: the facade flattens, the
+native side rebuilds, and both sides pin the same rules in tests, so a
+disagreement cannot quietly become a car that displays one album and plays
+another.
+
+Two things outside the engine's reach. The `com.apple.developer.carplay-audio`
+entitlement is granted by Apple per app; until it is, none of this appears in a
+car and nothing logs to say why. And yuzic commits its `ios/` directory, so the
+config plugin's Info.plist scene entry lands only on a prebuild.
+
 ## What is not decided yet
 
 The architecture above is settled. What remains is empirical, and there is a
