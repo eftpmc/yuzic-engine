@@ -253,8 +253,19 @@ class YuzicEngineModule : Module() {
     // argument shapes are taken from `src/AudioEngine.ts` so that the iOS
     // implementations, when they land, have nothing to negotiate.
 
-    AsyncFunction("setBrowseTree") { root: BrowseNodeRecord ->
-      PlaybackService.browseRoot = root
+    /**
+     * Take the tree the way the bridge actually sends it.
+     *
+     * `(title, flatNodes)`, not one nested record: an Expo `Record` cannot
+     * contain itself, so `src/browseTree.ts` flattens to a list with parent
+     * references and the native side rebuilds. This declared the nested shape
+     * and would have thrown on the first call — the arity alone is wrong.
+     *
+     * Worth noting how it survived: the two platforms were compared by
+     * function *name*, and the names matched. Signatures are the other half.
+     */
+    AsyncFunction("setBrowseTree") { title: String, nodes: List<FlatBrowseNodeRecord> ->
+      PlaybackService.browseRoot = buildBrowseTree(title, nodes)
     }
 
     AsyncFunction("clearBrowseTree") {
@@ -278,6 +289,9 @@ class YuzicEngineModule : Module() {
   // `PlaybackService.onCreate` is where the graph is made. An Expo
   // `AsyncFunction` body runs on a background dispatcher, so *every* call has to
   // hop — there is no such thing as a cheap read here.
+
+  /** The same cap iOS uses, for the same reason: a bad parent id must not recurse forever. */
+  private val BROWSE_MAX_DEPTH = 16
 
   private val main = Handler(Looper.getMainLooper())
 
@@ -370,6 +384,57 @@ class YuzicEngineModule : Module() {
    * itself. Without this the two disagree the moment anyone presses next, and
    * the crossfade rules start reasoning about the wrong pair of tracks.
    */
+  /**
+   * Rebuild the nested tree from the flat list, mirroring `BrowseTree.build`
+   * in `ios/Core/BrowseTree.swift` rule for rule.
+   *
+   * The rules are the ones architecture.md §11 states, and each is a decision
+   * rather than a detail:
+   *
+   * - **Duplicate ids keep the first.** Selection resolves by id, so the
+   *   alternative is a car playing something other than what it displayed.
+   * - **Orphans are dropped, not promoted.** A half-loaded library should show
+   *   less, not show a flat pile of tracks where albums were expected. Falling
+   *   out of the grouping rather than being handled: a node whose parent is
+   *   not in `childrenByParent` is simply never assembled.
+   * - **Depth is capped**, at the same 16 as iOS, so a tree that references
+   *   itself through a bad parent id cannot recurse forever.
+   */
+  private fun buildBrowseTree(title: String, flat: List<FlatBrowseNodeRecord>): BrowseNodeRecord {
+    val seen = mutableSetOf<String>()
+    val childrenByParent = mutableMapOf<String, MutableList<FlatBrowseNodeRecord>>()
+    val roots = mutableListOf<FlatBrowseNodeRecord>()
+
+    for (node in flat) {
+      if (!seen.add(node.id)) continue
+      val parentId = node.parentId
+      if (parentId != null) {
+        childrenByParent.getOrPut(parentId) { mutableListOf() }.add(node)
+      } else {
+        roots.add(node)
+      }
+    }
+
+    fun assemble(node: FlatBrowseNodeRecord, depth: Int): BrowseNodeRecord =
+      BrowseNodeRecord().apply {
+        id = node.id
+        // Qualified: the enclosing function's `title` parameter is nearer in
+        // scope than this record's field, and is a val.
+        this.title = node.title
+        subtitle = node.subtitle
+        artworkUri = node.artworkUri
+        playable = node.playable
+        children = if (depth >= BROWSE_MAX_DEPTH) emptyList()
+        else childrenByParent[node.id].orEmpty().map { assemble(it, depth + 1) }
+      }
+
+    return BrowseNodeRecord().apply {
+      id = "root"
+      this.title = title
+      children = roots.map { assemble(it, 1) }
+    }
+  }
+
   // MARK: - Telling the host what happened
   //
   // Until this existed, `onProgress`, `onStateChange` and `onTrackChange` were
@@ -581,6 +646,24 @@ class EqBandRecord : Record {
   @Field var frequencyHz: Double = 0.0
   @Field var gainDb: Double = 0.0
   @Field var q: Double? = null
+}
+
+/**
+ * One node on the way across the bridge, as `FlatBrowseNode` in
+ * `src/browseTree.ts` sends it.
+ *
+ * Flat because an Expo `Record` cannot contain itself — `@Field` has no way to
+ * describe recursion — so the tree travels as a list with parent references
+ * and is rebuilt on this side. A bridge artifact, not a shape anyone designs
+ * against.
+ */
+class FlatBrowseNodeRecord : Record {
+  @Field var id: String = ""
+  @Field var parentId: String? = null
+  @Field var title: String = ""
+  @Field var subtitle: String? = null
+  @Field var artworkUri: String? = null
+  @Field var playable: TrackRecord? = null
 }
 
 class ReplayGainRecord : Record {
