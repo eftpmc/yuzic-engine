@@ -31,6 +31,48 @@ describe('config plugin', () => {
     });
   });
 
+  describe('CarPlay scene', () => {
+    it('names the delegate class the system looks up', () => {
+      // Without this entry CarPlay never constructs the delegate and the app
+      // just does not appear on the car's home screen — no error anywhere.
+      const plist = plugin.addCarPlayScene({});
+      const scenes =
+        plist.UIApplicationSceneManifest.UISceneConfigurations
+          .CPTemplateApplicationSceneSessionRoleApplication;
+      expect(scenes[0].UISceneDelegateClassName).toBe('YuzicCarPlaySceneDelegate');
+    });
+
+    it('keeps scene roles the app already declared', () => {
+      const plist = plugin.addCarPlayScene({
+        UIApplicationSceneManifest: {
+          UISceneConfigurations: {
+            UIWindowSceneSessionRoleApplication: [{ UISceneConfigurationName: 'Default' }],
+          },
+        },
+      });
+      const roles = plist.UIApplicationSceneManifest.UISceneConfigurations;
+      // Clobbering this is how you fix CarPlay and break the phone app.
+      expect(roles.UIWindowSceneSessionRoleApplication).toHaveLength(1);
+      expect(roles.CPTemplateApplicationSceneSessionRoleApplication).toHaveLength(1);
+    });
+
+    it('is idempotent', () => {
+      let plist = plugin.addCarPlayScene({});
+      plist = plugin.addCarPlayScene(plist);
+      expect(
+        plist.UIApplicationSceneManifest.UISceneConfigurations
+          .CPTemplateApplicationSceneSessionRoleApplication
+      ).toHaveLength(1);
+    });
+
+    it('does not fabricate the CarPlay entitlement', () => {
+      // It has to be granted by Apple per app. Writing it here would produce a
+      // build that fails to sign with a far more cryptic message.
+      const plist = plugin.addCarPlayScene({});
+      expect(JSON.stringify(plist)).not.toContain('carplay-audio');
+    });
+  });
+
   describe('playback service', () => {
     const emptyManifest = () => ({ manifest: {} }) as any;
     const application = () => ({}) as any;

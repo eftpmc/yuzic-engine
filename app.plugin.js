@@ -28,9 +28,41 @@ function addBackgroundAudio(infoPlist) {
   return infoPlist;
 }
 
+/**
+ * iOS: tell the system this app has a CarPlay screen, and which class draws it.
+ *
+ * Without this entry CarPlay never constructs the scene delegate, and the app
+ * simply does not appear on the car's home screen — no error, no log, nothing
+ * to search for. The class name is a *string* here and `@objc`-pinned on the
+ * Swift side, because Swift's mangled name is not what the system looks up.
+ *
+ * The `com.apple.developer.carplay-audio` entitlement is a separate matter and
+ * deliberately not written here: it has to be granted by Apple per app, and a
+ * plugin that fabricated it would produce a build that fails to sign with a
+ * far less obvious message than "you do not have this entitlement".
+ */
+function addCarPlayScene(infoPlist) {
+  const manifest = infoPlist.UIApplicationSceneManifest ?? {};
+  const roles = manifest.UISceneConfigurations ?? {};
+  const carPlay = roles.CPTemplateApplicationSceneSessionRoleApplication ?? [];
+
+  const name = 'YuzicEngineCarPlay';
+  if (!carPlay.some(scene => scene.UISceneConfigurationName === name)) {
+    carPlay.push({
+      UISceneConfigurationName: name,
+      UISceneDelegateClassName: 'YuzicCarPlaySceneDelegate',
+    });
+  }
+
+  roles.CPTemplateApplicationSceneSessionRoleApplication = carPlay;
+  manifest.UISceneConfigurations = roles;
+  infoPlist.UIApplicationSceneManifest = manifest;
+  return infoPlist;
+}
+
 function withBackgroundAudio(config) {
   return withInfoPlist(config, config => {
-    config.modResults = addBackgroundAudio(config.modResults);
+    config.modResults = addCarPlayScene(addBackgroundAudio(config.modResults));
     return config;
   });
 }
@@ -107,4 +139,5 @@ module.exports = function withYuzicEngine(config) {
 // at prebuild — the app just stops when the screen locks — so these are worth
 // pinning.
 module.exports.addBackgroundAudio = addBackgroundAudio;
+module.exports.addCarPlayScene = addCarPlayScene;
 module.exports.addPlaybackService = addPlaybackService;

@@ -109,6 +109,34 @@ public final class YuzicEngineModule: Module {
       self.engine?.queue.crossfade = options?.asSettings
     }
 
+    /**
+     Hand the car its browse tree.
+
+     Pushed down in advance rather than served on demand, because the car asks
+     when the app's JavaScript is asleep — someone starts driving, the phone
+     connects, and there is no runtime awake to answer. A tree that has to be
+     fetched from JS is a tree that is sometimes empty at exactly the wrong
+     moment.
+     */
+    AsyncFunction("setBrowseTree") { (title: String, nodes: [BrowseNodeRecord]) in
+      let tree = BrowseTree.build(title: title, from: nodes.map(\.asFlatNode))
+      CarPlayCoordinator.shared.setRoot(tree)
+      CarPlayCoordinator.shared.setPlayHandler { [weak self] tracks, index in
+        guard let self else { return }
+        // Played natively rather than round-tripped through JS, for the same
+        // reason the tree is: nothing may be listening. The host finds out
+        // afterwards through the ordinary track-change event.
+        self.engine?.setQueue(tracks, startIndex: index)
+        try? self.engine?.play()
+        self.sendEvent("onQueueChange", [:])
+      }
+    }
+
+    AsyncFunction("clearBrowseTree") {
+      CarPlayCoordinator.shared.setRoot(nil)
+      CarPlayCoordinator.shared.setPlayHandler(nil)
+    }
+
     AsyncFunction("setSampleRateMode") { (mode: String) in
       // Enforced rather than merely recorded. Overlapping sources may differ in
       // rate — the mixer converts — but the *hardware* rate cannot change
@@ -185,6 +213,22 @@ struct TrackRecord: Record {
   @Field var continuous: Bool = false
 }
 
+/**
+ One browse node, flat.
+
+ Flat because a `Record` cannot contain itself — `@Field` has no way to
+ describe recursion — so the tree crosses the bridge as a list with parent
+ references and is rebuilt on this side.
+ */
+struct BrowseNodeRecord: Record {
+  @Field var id: String = ""
+  @Field var parentId: String?
+  @Field var title: String = ""
+  @Field var subtitle: String?
+  @Field var artworkUri: String?
+  @Field var playable: TrackRecord?
+}
+
 struct EqBandRecord: Record {
   @Field var frequencyHz: Double = 0
   @Field var gainDb: Double = 0
@@ -219,6 +263,19 @@ extension TrackRecord {
       replayGainDb: replayGainDb,
       replayGainPeak: replayGainPeak,
       continuous: continuous
+    )
+  }
+}
+
+extension BrowseNodeRecord {
+  var asFlatNode: BrowseTree.FlatNode {
+    BrowseTree.FlatNode(
+      id: id,
+      parentId: parentId,
+      title: title,
+      subtitle: subtitle,
+      artworkUri: artworkUri,
+      playable: playable?.asTrack
     )
   }
 }

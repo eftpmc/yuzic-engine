@@ -1,7 +1,8 @@
 import { requireNativeModule } from 'expo-modules-core';
 
 import type { AudioEngine } from './AudioEngine';
-import type { EngineEvent, PlaybackState, Progress, MediaId } from './types';
+import { flattenBrowseTree } from './browseTree';
+import type { BrowseNode, EngineEvent, PlaybackState, Progress, MediaId } from './types';
 
 /**
  * The native module, plus the one thing that cannot be a straight pass-through.
@@ -15,14 +16,18 @@ import type { EngineEvent, PlaybackState, Progress, MediaId } from './types';
  * and then threw "Value is a function, expected a String" the first time
  * anything subscribed.
  *
+ * `setBrowseTree` is the other one, for a duller reason: the tree cannot cross
+ * as a tree, so it is flattened here rather than making every host do it.
+ *
  * So the union is assembled here, over the six named events the module
  * declares. If a name is added natively it must be added to `EVENTS` too;
  * that duplication is the price of the nicer surface, and it is small and
  * visible rather than spread across call sites.
  */
 
-type NativeModule = Omit<AudioEngine, 'addListener'> & {
+type NativeModule = Omit<AudioEngine, 'addListener' | 'setBrowseTree'> & {
   addListener(name: string, listener: (payload: any) => void): { remove(): void };
+  setBrowseTree(title: string, nodes: ReturnType<typeof flattenBrowseTree>): Promise<void>;
 };
 
 const native = requireNativeModule<NativeModule>('YuzicEngine');
@@ -68,6 +73,10 @@ function toEvent(name: (typeof EVENTS)[number], payload: any): EngineEvent | nul
 }
 
 export const YuzicEngine: AudioEngine = Object.assign(Object.create(native), {
+  setBrowseTree(root: BrowseNode): Promise<void> {
+    return native.setBrowseTree(root.title, flattenBrowseTree(root));
+  },
+
   addListener(listener: (event: EngineEvent) => void): () => void {
     const subscriptions = EVENTS.map(name =>
       native.addListener(name, (payload: any) => {
