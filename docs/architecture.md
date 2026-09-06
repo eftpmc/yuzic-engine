@@ -424,8 +424,19 @@ go/no-go:
    Used only at the seek site; everywhere else the reader is discarded and the
    wait would buy nothing.
 
-   Outstanding: time-to-first-sample, which still wants a real server rather
-   than a stub.
+   ~~Outstanding: time-to-first-sample.~~ **Done — 333ms**, on the simulator
+   against a real Navidrome over the open internet: playing at 4.4s with 11.1s
+   buffered, seek to 151.4s, first sample 333ms later. That is a seek far
+   outside anything fetched, answered in about a third of a second, so the
+   ranged-GET path costs roughly one round trip and a decode rather than a
+   rebuffer. Driven from yuzic's dev smoke test, which is where the number can
+   be re-taken.
+
+   Measuring it also caught a divergence the tests could not: `bufferedSec` is
+   **absolute** — on the same timeline as the position — because that is what a
+   buffering bar is drawn against. iOS did that and said so; `src/types.ts`
+   documented the opposite, and the Android port had followed the docs. Both
+   corrected to match iOS.
 4. **Two nodes at 44.1 and 96 crossfaded through the mixer**, on device and
    over Bluetooth. Decide mixer SRC versus `AVAudioConverter` by listening.
 5. **Configuration-change survival**: pull the route mid-crossfade, confirm the

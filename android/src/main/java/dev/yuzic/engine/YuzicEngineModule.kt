@@ -175,10 +175,11 @@ class YuzicEngineModule : Module() {
           // a live stream. The contract says 0 there, not a negative sentinel
           // leaking into a progress bar.
           "durationSec" to it.duration.let { ms -> if (ms == androidx.media3.common.C.TIME_UNSET) 0.0 else ms / 1000.0 },
-          // Buffered is reported from the current position, not from zero,
-          // because what a buffering indicator means is "how much runway is
-          // left" — see Progress.bufferedSec in src/types.ts.
-          "bufferedSec" to ((it.bufferedPosition - it.currentPosition).coerceAtLeast(0)) / 1000.0,
+          // Absolute, on the same timeline as the position — matching iOS, and
+          // for the reason it gives: a buffering bar is drawn against the same
+          // scale as the progress bar. Media3's `bufferedPosition` is already
+          // absolute, so this is the raw figure rather than a difference.
+          "bufferedSec" to it.bufferedPosition.coerceAtLeast(0) / 1000.0,
         )
       }
     }
@@ -533,7 +534,8 @@ class YuzicEngineModule : Module() {
       mapOf(
         "positionSec" to player.currentPosition.coerceAtLeast(0) / 1000.0,
         "durationSec" to if (duration == androidx.media3.common.C.TIME_UNSET) 0.0 else duration / 1000.0,
-        "bufferedSec" to ((player.bufferedPosition - player.currentPosition).coerceAtLeast(0)) / 1000.0,
+        // Absolute, as in `getProgress` and on iOS — see Progress.bufferedSec.
+        "bufferedSec" to player.bufferedPosition.coerceAtLeast(0) / 1000.0,
       ),
     )
   }

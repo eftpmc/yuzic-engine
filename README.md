@@ -113,9 +113,10 @@ Reasoning for each is in [docs/architecture.md](docs/architecture.md).
   `onStateChange` and `onTrackChange` are declared and nothing emits them —
   only `onRemoteCommand` is wired. A host on Android can ask where it is but
   will never be told.
-- **Seek cost, measured**: a seek now abandons the request it was waiting on
-  promptly rather than at the HTTP timeout, but time-to-first-sample into an
-  unfetched region has still never been timed end to end. See open question 3.
+- ~~**Seek cost, measured.**~~ Answered: **333ms** to first sample seeking from
+  4.4s to 151.4s with only 11.1s buffered, against a real Navidrome over the
+  open internet. A seek far outside the fetched region costs about a round trip,
+  not a rebuffer. See §2 and open question 3.
 
 ## Settled by building
 

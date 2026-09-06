@@ -85,7 +85,15 @@ export interface Progress {
   positionSec: number;
   /** 0 until the decoder knows, and for anything `continuous`. */
   durationSec: number;
-  /** How far ahead the cache holds contiguous audio from the current position. */
+  /**
+   * How far the cache holds contiguous audio, on the *same timeline as
+   * `positionSec`* — not a distance ahead of the playhead.
+   *
+   * A track playing at 4s with ten seconds fetched ahead reports 14, so a
+   * buffering bar can be drawn against the same scale as the progress bar with
+   * no arithmetic on the host's part. Measured from the playhead instead, the
+   * figure would sit at the wrong end of that bar.
+   */
   bufferedSec: number;
 }
 
