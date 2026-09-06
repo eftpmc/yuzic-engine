@@ -14,8 +14,11 @@ import Foundation
  Swift that `swift test` can reach.
  */
 
+/// Stable identity for a track, chosen by the host. Opaque to the engine.
+public typealias MediaId = String
+
 public struct Track: Equatable {
-  public let id: String
+  public let id: MediaId
   public let uri: String
   public let title: String
   public let artist: String?
