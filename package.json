@@ -7,9 +7,8 @@
     "type": "git",
     "url": "git+https://github.com/eftpmc/yuzic-engine.git"
   },
-  "main": "lib/commonjs/index.js",
-  "module": "lib/module/index.js",
-  "types": "lib/typescript/index.d.ts",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "source": "src/index.ts",
   "files": [
     "src",
@@ -23,7 +22,9 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "jest"
+    "test": "jest",
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build"
   },
   "keywords": [
     "react-native",
