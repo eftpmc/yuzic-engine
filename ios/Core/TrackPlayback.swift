@@ -91,9 +91,43 @@ public final class TrackPlayback {
     fill()
   }
 
+  /**
+   Stop feeding the node, and unblock the decode thread if it is waiting.
+
+   `stopped` is set before the node is stopped so the completion handlers that
+   `stop()` fires for the flushed buffers see it and do not schedule more.
+
+   The cancel is what makes this prompt. Without it a producer parked in a
+   network read stays parked — holding a thread and a request open until the
+   HTTP timeout, long after nothing wants the audio. It does not wait for that
+   to happen: the thread unwinds on its own, and this playback is being
+   discarded either way.
+   */
   public func stop() {
     lock.lock(); stopped = true; lock.unlock()
     voice.player.stop()
+    reader.cancelPendingReads()
+  }
+
+  /**
+   Stop, and do not return until the decode thread has actually unwound.
+
+   For the one case where the difference matters: a seek builds a new
+   `TrackPlayback` over the *same* reader, and `AudioFileReader` is explicitly
+   not thread-safe. Returning while the old producer is still inside
+   `ExtAudioFileRead` would leave two threads in one reader, with the new one
+   seeking it — which is undefined behaviour rather than a race that merely
+   sounds bad.
+
+   The queue is serial, so an empty block is a barrier: it runs only once the
+   read in flight has returned. The reads are put back to work afterwards
+   because the reader is about to be reused, and a cancelled source refuses
+   everything.
+   */
+  public func stopAndWait() {
+    stop()
+    queue.sync {}
+    reader.resumePendingReads()
   }
 
   /// Decode and schedule until the target depth is reached. Safe to call

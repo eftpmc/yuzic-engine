@@ -272,3 +272,100 @@ enum EncodedFixture {
     }
   }
 }
+
+/// The scheduler's side of cancellation: what a seek does to a decode thread
+/// that is parked on the network.
+final class TrackPlaybackCancellationTests: XCTestCase {
+
+  /**
+   A seek must not wait for the read it is interrupting.
+
+   This is the end-to-end half of the cancellation work: `CachedByteSource` and
+   `HTTPByteFetcher` can each abandon a read on demand, but until `stop` called
+   through to them, a producer parked on the network stayed parked — and the
+   seek that wanted the reader had to wait it out.
+
+   Waiting is also what makes it more than a slow seek. `PlaybackEngine.seek`
+   builds a new `TrackPlayback` over the *same* reader, and `AudioFileReader`
+   is not thread-safe, so returning early would put two threads inside one
+   reader with the new one seeking it.
+   */
+  func testStopAndWaitReturnsWithoutWaitingOutABlockedRead() throws {
+    let fixture = try EncodedFixture.wav(seconds: 3)
+    let gate = GatedFetcher(fixture.fetcher)
+    let source = CachedByteSource(fetcher: gate, windowBytes: 32 * 1024)
+    let reader = AudioFileReader(source: source)
+    try reader.open()
+
+    let graph = AudioGraph(sampleRate: reader.sampleRate)
+    try graph.startOffline(sampleRate: reader.sampleRate)
+
+    // Stall everything the decode thread asks for from here on, the way a
+    // connection that has gone quiet does.
+    gate.stall()
+
+    let playback = TrackPlayback(reader: reader, voice: graph.activeVoice)
+    try playback.start()
+
+    XCTAssertEqual(gate.blocked.wait(timeout: .now() + 5), .success,
+                   "the decode thread never reached a blocking read")
+
+    let started = Date()
+    playback.stopAndWait()
+    let waited = Date().timeIntervalSince(started)
+    XCTAssertLessThan(waited, 2, "stopAndWait waited out the read instead of cancelling it")
+
+    // And the reader is left usable, because a seek is about to reuse this
+    // exact one. A cancelled source that was never resumed would refuse.
+    gate.release()
+    try reader.seek(toFrame: 0)
+    XCTAssertNotNil(try reader.read(frames: 1024))
+  }
+}
+
+/**
+ Wraps a fetcher and parks in `fetch` on command, releasing only on a cancel.
+
+ The point is to hold the producer inside a read at the moment the test calls
+ `stopAndWait`, which is the situation the real code hits on a slow network and
+ cannot otherwise be arranged deterministically.
+ */
+private final class GatedFetcher: ByteFetcher, @unchecked Sendable {
+  private let inner: ByteFetcher
+  private let lock = NSLock()
+  private var stalling = false
+  private var cancelled = false
+
+  /// Signalled once the producer is actually parked, so the test does not race it.
+  let blocked = DispatchSemaphore(value: 0)
+  private let gate = DispatchSemaphore(value: 0)
+
+  init(_ inner: ByteFetcher) { self.inner = inner }
+
+  func stall() { lock.lock(); stalling = true; lock.unlock() }
+
+  func release() {
+    lock.lock(); stalling = false; cancelled = false; lock.unlock()
+    gate.signal()
+  }
+
+  func contentLength() throws -> Int64 { try inner.contentLength() }
+
+  func fetch(_ range: Range<Int64>) throws -> Data {
+    lock.lock(); let stall = stalling; lock.unlock()
+    if stall {
+      blocked.signal()
+      gate.wait()
+      lock.lock(); let wasCancelled = cancelled; lock.unlock()
+      if wasCancelled { throw ByteSourceError.cancelled }
+    }
+    return try inner.fetch(range)
+  }
+
+  func cancel() {
+    lock.lock(); cancelled = true; lock.unlock()
+    gate.signal()
+  }
+
+  func resume() { lock.lock(); cancelled = false; lock.unlock() }
+}

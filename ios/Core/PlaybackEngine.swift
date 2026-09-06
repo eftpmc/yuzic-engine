@@ -196,7 +196,10 @@ public final class PlaybackEngine {
     // of the wrong track; collapse the transition first.
     cancelTransition()
     let frame = Int64(seconds * reader.sampleRate)
-    activePlayback?.stop()
+    // Waits, unlike everywhere else `stop` is called: the reader below is the
+    // one this playback is decoding from, and it cannot be seeked while the
+    // old producer is still inside it.
+    activePlayback?.stopAndWait()
     let playback = TrackPlayback(reader: reader, voice: graph.activeVoice)
     playback.onEndOfTrack = { [weak self] in self?.handleTrackFinished() }
     activePlayback = playback

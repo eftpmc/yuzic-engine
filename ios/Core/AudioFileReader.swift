@@ -157,6 +157,24 @@ public final class AudioFileReader {
   }
 
   /**
+   Unblock a read parked on the network, so the producer thread unwinds.
+
+   Forwarded to the byte source, which is the only thing that can be waiting.
+   The read proc turns the resulting `cancelled` into end-of-file, so the
+   parser unwinds cleanly and `read` returns nil — see `readProc`.
+
+   Exposed here rather than reaching for the source directly because this class
+   owns it, and because "stop waiting" is a reader-level idea: the caller
+   holding a reader has no business knowing whether the bytes come from a
+   socket or a file.
+   */
+  public func cancelPendingReads() { source.cancel() }
+
+  /// Undo `cancelPendingReads`. Required before the reader is used again — a
+  /// cancelled source refuses every read until it is put back to work.
+  public func resumePendingReads() { source.resume() }
+
+  /**
    Decode up to `frames` frames.
 
    Returns nil at end of stream. A short buffer is normal near the end and is
