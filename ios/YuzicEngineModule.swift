@@ -165,6 +165,20 @@ public final class YuzicEngineModule: Module {
       }
     }
 
+    /**
+     Which remote controls to advertise.
+
+     Not a fixed property of the engine: a podcast wants skip-forward rather
+     than next-track, and a live stream should not draw a scrubber over
+     something with no end.
+     */
+    AsyncFunction("setCommands") { (commands: [String]) in
+      // An unrecognised name is dropped rather than defaulted. Advertising a
+      // control the host never asked for is how a car ends up with a button
+      // that does nothing.
+      self.engine?.remoteCommands = commands.compactMap { RemoteCommand(rawValue: $0) }
+    }
+
     AsyncFunction("clearBrowseTree") {
       CarPlayCoordinator.shared.setRoot(nil)
       CarPlayCoordinator.shared.setPlayHandler(nil)

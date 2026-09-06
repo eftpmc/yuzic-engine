@@ -87,6 +87,22 @@ public final class PlaybackEngine {
   /// The lock screen, Control Centre, headphone buttons and the car all arrive
   /// here. They are wired once at construction rather than per track: a control
   /// that disappears between tracks is worse than one that was never offered.
+  /**
+   Which controls to advertise.
+
+   Worth being able to change, because the right set is not a property of the
+   engine. A podcast wants skip-forward rather than next-track; a live stream
+   should not offer a scrubber over a thing with no end. Defaults to the four
+   that suit music.
+
+   A control that is offered but does nothing is worse than one that is absent,
+   so this is a list of what the host will honour, not everything the framework
+   can draw.
+   */
+  public var remoteCommands: [RemoteCommand] = [.playPause, .next, .previous, .seek] {
+    didSet { if remoteCommands != oldValue { wireRemoteCommands() } }
+  }
+
   private func wireRemoteCommands() {
     var handlers = RemoteCommandHandlers()
     handlers.play = { [weak self] in try? self?.play() }
@@ -95,7 +111,7 @@ public final class PlaybackEngine {
     handlers.previous = { [weak self] in try? self?.skipToPrevious() }
     handlers.seek = { [weak self] position in try? self?.seek(toSeconds: position) }
     handlers.stop = { [weak self] in self?.stop() }
-    nowPlaying.setCommands([.playPause, .next, .previous, .seek], handlers: handlers)
+    nowPlaying.setCommands(remoteCommands, handlers: handlers)
   }
 
   /**
