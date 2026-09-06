@@ -55,7 +55,14 @@ public final class TrackPlayback {
    into the future.
    */
   public var currentFrame: Int64 {
+    // `playerTime(forNodeTime:)` is not merely optional-returning: it asserts
+    // that the time it is handed carries a valid sample or host time, and
+    // `lastRenderTime` returns one with neither in the window between starting
+    // a node and its first render. Passing that straight through traps —
+    // a hard crash, not a nil — and the window is exactly when the lock screen
+    // asks for a position.
     guard let nodeTime = voice.player.lastRenderTime,
+          nodeTime.isSampleTimeValid || nodeTime.isHostTimeValid,
           let playerTime = voice.player.playerTime(forNodeTime: nodeTime) else {
       return startFrame
     }

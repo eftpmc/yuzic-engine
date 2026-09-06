@@ -41,6 +41,7 @@ public final class PlaybackEngine {
 
   private let graph: AudioGraph
   private let factory: TrackReaderFactory
+  private let nowPlaying: NowPlayingCenter
   public let queue = PlaybackQueue()
 
   private var activePlayback: TrackPlayback?
@@ -57,9 +58,59 @@ public final class PlaybackEngine {
 
   public var onEvent: ((Event) -> Void)?
 
-  public init(graph: AudioGraph, factory: TrackReaderFactory) {
+  public init(
+    graph: AudioGraph,
+    factory: TrackReaderFactory,
+    nowPlaying: NowPlayingCenter = NowPlayingCenter()
+  ) {
     self.graph = graph
     self.factory = factory
+    self.nowPlaying = nowPlaying
+    wireRemoteCommands()
+  }
+
+  /// The lock screen, Control Centre, headphone buttons and the car all arrive
+  /// here. They are wired once at construction rather than per track: a control
+  /// that disappears between tracks is worse than one that was never offered.
+  private func wireRemoteCommands() {
+    var handlers = RemoteCommandHandlers()
+    handlers.play = { [weak self] in try? self?.play() }
+    handlers.pause = { [weak self] in self?.pause() }
+    handlers.next = { [weak self] in try? self?.skipToNext() }
+    handlers.previous = { [weak self] in try? self?.skipToPrevious() }
+    handlers.seek = { [weak self] position in try? self?.seek(toSeconds: position) }
+    handlers.stop = { [weak self] in self?.stop() }
+    nowPlaying.setCommands([.playPause, .next, .previous, .seek], handlers: handlers)
+  }
+
+  /**
+   Push the current track and state to the lock screen.
+
+   Called on every transition and on pause/resume, *not* on every progress tick.
+   `elapsedPlaybackTime` is a fix point that iOS extrapolates from using the
+   rate — re-sending it four times a second makes the lock-screen timer stutter
+   as it is repeatedly yanked back to a value already going stale.
+   */
+  private func publishNowPlaying() {
+    guard let track = queue.activeTrack, let reader = activeReader else {
+      nowPlaying.clear()
+      return
+    }
+    let sampleRate = reader.sampleRate > 0 ? reader.sampleRate : 44_100
+    let position = Double(activePlayback?.currentFrame ?? 0) / sampleRate
+    nowPlaying.update(
+      .init(
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        durationSec: track.continuous ? 0 : Double(reader.totalFrames) / sampleRate,
+        positionSec: position,
+        isPlaying: state == .playing,
+        rate: 1.0,
+        isLive: track.continuous
+      ),
+      artworkUri: track.artworkUri
+    )
   }
 
   deinit { ticker?.invalidate() }
@@ -78,6 +129,7 @@ public final class PlaybackEngine {
     } else {
       activePlayback?.resume()
       state = .playing
+      publishNowPlaying()
       startTicking()
     }
   }
@@ -86,6 +138,7 @@ public final class PlaybackEngine {
     activePlayback?.pause()
     incomingPlayback?.pause()
     state = .paused
+    publishNowPlaying()
     stopTicking()
   }
 
@@ -106,6 +159,9 @@ public final class PlaybackEngine {
     activePlayback = playback
     try playback.start(atFrame: frame)
     state = .playing
+    // A seek moves the fix point, so the lock screen has to be told or its
+    // timer carries on from where the track used to be.
+    publishNowPlaying()
     startTicking()
   }
 
@@ -166,6 +222,7 @@ public final class PlaybackEngine {
 
     state = .playing
     emit(.trackChanged(index: index, id: track.id, previousListenedSec: previousListenedSec))
+    publishNowPlaying()
     startTicking()
   }
 
@@ -244,6 +301,7 @@ public final class PlaybackEngine {
         self.transitioning = false
         self.emit(.trackChanged(index: self.queue.activeIndex, id: next.id,
                                 previousListenedSec: listened))
+        self.publishNowPlaying()
       }
     } catch {
       transitioning = false
@@ -270,6 +328,7 @@ public final class PlaybackEngine {
   private func finish() {
     stopEverything()
     state = .ended
+    nowPlaying.clear()
     emit(.ended)
   }
 
