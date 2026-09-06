@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<automotiveApp>
+  <!--
+    "media" is the only capability claimed. Declaring anything else — a
+    templated app, messaging — invites Auto to look for surfaces this module
+    does not implement, and the review process treats an unbacked claim as a
+    defect.
+  -->
+  <uses name="media" />
+</automotiveApp>

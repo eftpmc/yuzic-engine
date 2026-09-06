@@ -1,0 +1,60 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <!--
+    FOREGROUND_SERVICE is the old blanket permission; from API 34 it is not
+    enough on its own and the typed one has to be declared alongside it, matching
+    the android:foregroundServiceType below. Declaring only one of the pair is
+    the usual way this fails, and it fails at startService time on a user's
+    device rather than at build time here.
+  -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+  <!--
+    Media3 takes the wake lock itself once setHandleAudioBecomingNoisy /
+    setWakeMode are on, but it can only take a lock the manifest has already
+    granted. Without this, playback stops when the CPU sleeps with the screen
+    off, which is exactly the case this engine is for.
+  -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+  <uses-permission android:name="android.permission.INTERNET" />
+
+  <!--
+    POST_NOTIFICATIONS is the media notification on API 33+. It is a runtime
+    permission and the host app asks for it; declaring it here means the host
+    does not have to remember to merge it in, and playback without it still
+    works — it is the transport controls that go missing, not the audio.
+  -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <application>
+
+    <service
+      android:name="dev.yuzic.engine.PlaybackService"
+      android:exported="true"
+      android:foregroundServiceType="mediaPlayback">
+      <intent-filter>
+        <action android:name="androidx.media3.session.MediaLibraryService" />
+        <!--
+          The legacy action as well, and not for old phones: Android Auto and a
+          number of OEM head units still resolve media apps by the MediaBrowser
+          action. A session that answers only the Media3 action is invisible in
+          the car, which is the one place this whole service exists to work in.
+        -->
+        <action android:name="android.media.browse.MediaBrowserService" />
+      </intent-filter>
+    </service>
+
+    <!--
+      Android Auto. The declaration is what makes the app appear in the car's
+      launcher at all; the browse tree the host hands over via setBrowseTree is
+      what it shows once opened.
+    -->
+    <meta-data
+      android:name="com.google.android.gms.car.application"
+      android:resource="@xml/automotive_app_desc" />
+
+  </application>
+
+</manifest>

@@ -1,0 +1,51 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'dev.yuzic.engine'
+version = '0.0.0'
+
+// One place to bump Media3. Everything below is one coordinated release train —
+// exoplayer, session and the datasource/cache pieces are cut together and are
+// not safe to mix versions of, so they all read this.
+def MEDIA3_VERSION = project.properties.get('yuzicEngineMedia3Version', '1.9.0')
+
+android {
+  namespace 'dev.yuzic.engine'
+  defaultConfig {
+    // MediaLibraryService, the mediaPlayback foreground-service type and the
+    // notification handling Media3 does for us are the floor here. Below API 24
+    // none of the platform integration this module exists for works, and Expo
+    // SDK 55 has already moved past it.
+    minSdkVersion 24
+    versionCode 1
+    versionName '0.0.0'
+    consumerProguardFiles('proguard-rules.pro')
+  }
+}
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+
+  // The player itself, plus the decoders. `exoplayer` pulls the common
+  // extractors; `datasource-okhttp` is here because a track carries its own
+  // request headers (see Track.headers in src/types.ts) and OkHttp is what the
+  // rest of the app already authenticates through.
+  implementation "androidx.media3:media3-exoplayer:${MEDIA3_VERSION}"
+  implementation "androidx.media3:media3-datasource-okhttp:${MEDIA3_VERSION}"
+
+  // MediaLibraryService, MediaLibrarySession, and the notification/Android Auto
+  // plumbing that comes with them. This is the dependency that lets playback
+  // and remote commands survive JS being suspended — see docs/architecture.md §3.
+  implementation "androidx.media3:media3-session:${MEDIA3_VERSION}"
+
+  // Not strictly required to compile, but MediaLibrarySession's browse tree is
+  // built out of MediaItems whose artwork Media3 resolves through this, and
+  // Android Auto will show blank tiles without it.
+  implementation "androidx.media3:media3-common:${MEDIA3_VERSION}"
+
+  // SimpleCache / CacheDataSource. Android gets the whole of docs/architecture.md
+  // §2 from this artifact, which iOS has no equivalent of at any price.
+  implementation "androidx.media3:media3-datasource:${MEDIA3_VERSION}"
+}

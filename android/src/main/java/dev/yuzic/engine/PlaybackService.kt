@@ -1,0 +1,352 @@
+package dev.yuzic.engine
+
+import android.content.Intent
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.LibraryResult
+import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.MediaSession
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
+import com.google.common.collect.ImmutableList
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+import okhttp3.OkHttpClient
+
+/**
+ * The service that owns the session, the notification and the browse tree.
+ *
+ * Its whole reason for existing is docs/architecture.md §3: backgrounded apps
+ * have their JavaScript suspended, and the things that must keep working while
+ * it is suspended — advancing to the next track, updating the lock screen,
+ * answering a steering-wheel button, answering the car's request for a browse
+ * node — are exactly the ones users notice. So the queue, the tree and the
+ * transitions all live down here, and JS is a client of the same session
+ * Android Auto is.
+ *
+ * `MediaLibraryService` rather than the plainer `MediaSessionService` because
+ * the browse tree is not optional: Android Auto asks for a root before it will
+ * show the app at all.
+ */
+@UnstableApi
+class PlaybackService : MediaLibraryService() {
+
+  private var session: MediaLibrarySession? = null
+
+  /**
+   * The engine state, shared with [YuzicEngineModule].
+   *
+   * A companion holder rather than a bound-service handle. The module and the
+   * service have genuinely different lifetimes — the service outlives the JS
+   * context by design, and can be restarted by the system after the process is
+   * killed with no module in existence yet — so a binding that assumed both were
+   * alive would be wrong in exactly the situation this is built for.
+   */
+  companion object Engine {
+    @Volatile
+    var graph: AudioGraph? = null
+      private set
+
+    val queue = PlaybackQueue()
+
+    /** The root the host handed over via `setBrowseTree`. Null until it does. */
+    @Volatile
+    var browseRoot: BrowseNodeRecord? = null
+
+    /** Which remote controls the host asked to advertise. */
+    @Volatile
+    var enabledCommands: Set<String> = DEFAULT_COMMANDS
+
+    /**
+     * Anything the session needs to tell JS. Set by the module while it is
+     * alive and cleared when it goes away — the service must keep working with
+     * this null, which is the whole point of it living here.
+     */
+    @Volatile
+    var eventSink: ((String, Map<String, Any?>) -> Unit)? = null
+
+    val DEFAULT_COMMANDS = setOf("playPause", "next", "previous", "seek")
+
+    private const val BROWSE_ROOT_ID = "yuzic:root"
+
+    fun attachGraph(graph: AudioGraph) {
+      this.graph = graph
+    }
+
+    fun detachGraph() {
+      graph = null
+    }
+  }
+
+  override fun onCreate() {
+    super.onCreate()
+
+    val graph = this.graph ?: AudioGraph(this, OkHttpClient()).also { attachGraph(it) }
+
+    // AudioAttributes with handleAudioFocus is what makes the engine a good
+    // citizen: ducking for navigation prompts, pausing for a call, and resuming
+    // afterwards. Set on both voices, because during a crossfade both are
+    // producing audio and a focus loss must silence the pair.
+    val attributes = AudioAttributes.Builder()
+      .setUsage(C.USAGE_MEDIA)
+      .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+      .build()
+    graph.voiceA.player.setAudioAttributes(attributes, true)
+    graph.voiceB.player.setAudioAttributes(attributes, true)
+
+    session = MediaLibrarySession.Builder(this, EnginePlayer(graph), LibraryCallback())
+      .build()
+  }
+
+  override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? = session
+
+  /**
+   * Swiping the app away should not stop the music if it is playing — that is
+   * what the notification's own close action is for — but leaving a paused
+   * foreground service alive after the task is gone is how apps end up in
+   * battery-blame screens.
+   */
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    val player = session?.player
+    if (player == null || !player.playWhenReady || player.mediaItemCount == 0) {
+      stopSelf()
+    }
+  }
+
+  override fun onDestroy() {
+    session?.run {
+      player.release()
+      release()
+    }
+    session = null
+    graph?.release()
+    detachGraph()
+    super.onDestroy()
+  }
+
+  // MARK: - Browse tree
+
+  private inner class LibraryCallback : MediaLibrarySession.Callback {
+
+    override fun onConnect(
+      session: MediaSession,
+      controller: MediaSession.ControllerInfo,
+    ): MediaSession.ConnectionResult {
+      // The advertised command set is the host's call (`setCommands`), and it is
+      // applied here rather than remembered somewhere and applied later: this is
+      // the only moment Media3 asks, and a car that connected before the host
+      // called setCommands must still get a working transport.
+      val available = Player.Commands.Builder().apply {
+        add(Player.COMMAND_GET_TIMELINE)
+        add(Player.COMMAND_GET_CURRENT_MEDIA_ITEM)
+        add(Player.COMMAND_GET_METADATA)
+        if ("playPause" in enabledCommands) {
+          add(Player.COMMAND_PLAY_PAUSE)
+        }
+        if ("stop" in enabledCommands) add(Player.COMMAND_STOP)
+        if ("next" in enabledCommands) {
+          add(Player.COMMAND_SEEK_TO_NEXT)
+          add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+        }
+        if ("previous" in enabledCommands) {
+          add(Player.COMMAND_SEEK_TO_PREVIOUS)
+          add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+        }
+        if ("seek" in enabledCommands) add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+        if ("skipForward" in enabledCommands) add(Player.COMMAND_SEEK_FORWARD)
+        if ("skipBackward" in enabledCommands) add(Player.COMMAND_SEEK_BACK)
+      }.build()
+
+      return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+        .setAvailablePlayerCommands(available)
+        .build()
+    }
+
+    override fun onGetLibraryRoot(
+      session: MediaLibrarySession,
+      browser: MediaSession.ControllerInfo,
+      params: LibraryParams?,
+    ): ListenableFuture<LibraryResult<MediaItem>> {
+      val root = browseRoot
+        // A car that asks before the host has set a tree gets an empty
+        // browsable root, not an error. An error here makes the app look broken
+        // in the launcher; an empty root looks like a library still loading,
+        // which is what it is.
+        ?: return Futures.immediateFuture(
+          LibraryResult.ofItem(browsableItem(BROWSE_ROOT_ID, "yuzic"), params)
+        )
+      return Futures.immediateFuture(
+        LibraryResult.ofItem(browsableItem(root.id, root.title, root.subtitle, root.artworkUri), params)
+      )
+    }
+
+    override fun onGetChildren(
+      session: MediaLibrarySession,
+      browser: MediaSession.ControllerInfo,
+      parentId: String,
+      page: Int,
+      pageSize: Int,
+      params: LibraryParams?,
+    ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+      val node = findNode(browseRoot, parentId)
+        ?: return Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE))
+
+      val children = node.children.orEmpty().map { child ->
+        if (child.playable != null) {
+          child.playable.toMediaItem()
+        } else {
+          browsableItem(child.id, child.title, child.subtitle, child.artworkUri)
+        }
+      }
+
+      // Paged because Android Auto asks for pages and some head units enforce
+      // a hard limit per response. Serving the whole list regardless of `page`
+      // is a common bug that shows the first screen repeating forever.
+      val from = (page * pageSize).coerceAtMost(children.size)
+      val to = (from + pageSize).coerceAtMost(children.size)
+      return Futures.immediateFuture(
+        LibraryResult.ofItemList(ImmutableList.copyOf(children.subList(from, to)), params)
+      )
+    }
+
+    override fun onGetItem(
+      session: MediaLibrarySession,
+      browser: MediaSession.ControllerInfo,
+      mediaId: String,
+    ): ListenableFuture<LibraryResult<MediaItem>> {
+      val node = findNode(browseRoot, mediaId)
+        ?: return Futures.immediateFuture(LibraryResult.ofError(LibraryResult.RESULT_ERROR_BAD_VALUE))
+      val item = node.playable?.toMediaItem()
+        ?: browsableItem(node.id, node.title, node.subtitle, node.artworkUri)
+      return Futures.immediateFuture(LibraryResult.ofItem(item, null))
+    }
+
+    override fun onCustomCommand(
+      session: MediaSession,
+      controller: MediaSession.ControllerInfo,
+      customCommand: SessionCommand,
+      args: android.os.Bundle,
+    ): ListenableFuture<SessionResult> {
+      // Anything the session cannot answer alone is forwarded to the host, which
+      // replies by driving the ordinary API — the `remoteCommand` event in
+      // src/types.ts. If JS is asleep the sink is null and the command is
+      // dropped, which is correct: there is nothing that could answer it.
+      eventSink?.invoke(
+        "onRemoteCommand",
+        mapOf("command" to customCommand.customAction),
+      )
+      return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+    }
+  }
+
+  private fun browsableItem(
+    id: String,
+    title: String,
+    subtitle: String? = null,
+    artworkUri: String? = null,
+  ): MediaItem = MediaItem.Builder()
+    .setMediaId(id)
+    .setMediaMetadata(
+      MediaMetadata.Builder()
+        .setTitle(title)
+        .setSubtitle(subtitle)
+        .setArtworkUri(artworkUri?.let { android.net.Uri.parse(it) })
+        .setIsBrowsable(true)
+        .setIsPlayable(false)
+        .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
+        .build()
+    )
+    .build()
+
+  /**
+   * Depth-first walk of the tree the host handed over.
+   *
+   * Linear, and deliberately so for now: the tree arrives whole and is usually
+   * a few hundred nodes. If it grows to the point where this shows up, the fix
+   * is an id→node index built once in `setBrowseTree`, not a cleverer walk.
+   */
+  private fun findNode(node: BrowseNodeRecord?, id: String): BrowseNodeRecord? {
+    if (node == null) return null
+    if (node.id == id) return node
+    node.children?.forEach { child ->
+      findNode(child, id)?.let { return it }
+    }
+    return null
+  }
+}
+
+/**
+ * One `Player` for a session that is really two players.
+ *
+ * `MediaSession` takes exactly one `Player`, and the pair of voices is an
+ * implementation detail of the crossfade that the notification, the lock screen
+ * and the car have no business knowing about. This routes every call to whichever
+ * voice is currently foreground.
+ *
+ * `SimpleBasePlayer` is the sanctioned way to write a custom `Player` and was
+ * the first choice, but it wants the entire state re-derived into an immutable
+ * `State` on every change — and ExoPlayer's own state is already correct here.
+ * The only thing wrong with it is *which instance* holds it. Forwarding is the
+ * smaller lie.
+ */
+@UnstableApi
+private class EnginePlayer(private val graph: AudioGraph) :
+  androidx.media3.common.ForwardingPlayer(graph.voiceA.player) {
+
+  private val active: Player get() = graph.activeVoice.player
+
+  // Only the methods whose answer depends on which voice is live are overridden.
+  // Everything else — the queue, the metadata, the timeline — lives on the
+  // foreground voice, which is also the wrapped one whenever `activeIsA`, so
+  // forwarding is correct there by construction.
+  override fun getCurrentPosition(): Long = active.currentPosition
+  override fun getDuration(): Long = active.duration
+  override fun getBufferedPosition(): Long = active.bufferedPosition
+  override fun getPlaybackState(): Int = active.playbackState
+  override fun getPlayWhenReady(): Boolean = active.playWhenReady
+  override fun isPlaying(): Boolean = active.isPlaying
+
+  override fun play() {
+    active.play()
+  }
+
+  override fun pause() {
+    // Both, not just the active one. Pausing mid-crossfade while the outgoing
+    // voice keeps playing is the exact failure the two-player arrangement makes
+    // possible, and it sounds like the app is haunted.
+    graph.voiceA.player.pause()
+    graph.voiceB.player.pause()
+  }
+
+  override fun setPlayWhenReady(playWhenReady: Boolean) {
+    if (playWhenReady) active.play() else pause()
+  }
+
+  override fun seekTo(positionMs: Long) {
+    active.seekTo(positionMs)
+  }
+
+  override fun stop() {
+    graph.voiceA.player.stop()
+    graph.voiceB.player.stop()
+  }
+
+  override fun getAvailableCommands(): Player.Commands = active.availableCommands
+
+  override fun addListener(listener: Player.Listener) {
+    // Both, because the session must keep hearing about state after a swap. The
+    // alternative — re-registering on every crossover — races the swap and
+    // loses the first event after it.
+    graph.voiceA.player.addListener(listener)
+    graph.voiceB.player.addListener(listener)
+  }
+
+  override fun removeListener(listener: Player.Listener) {
+    graph.voiceA.player.removeListener(listener)
+    graph.voiceB.player.removeListener(listener)
+  }
+}
