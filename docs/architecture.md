@@ -408,8 +408,12 @@ go/no-go:
    **No for non-faststart M4A**, which needs its tail; the cache gets a
    tail-first prefetch for MP4-family files.
 3. **Seek into an unfetched region**: time-to-first-sample end to end, and
-   confirm an in-flight blocking read cancels in bounded time. Not yet run —
-   needs the real fetcher, since the spike served bytes from memory.
+   confirm an in-flight blocking read cancels in bounded time.
+   **Half done — cancellation, yes**, once it was built: `cancel` reached only
+   as far as a flag `ensure` read between fetches, so a seek waited out the
+   request it had arrived during. `ByteFetcher.cancel` now abandons the task,
+   and the bound is the cancel rather than the 30s timeout. Outstanding:
+   time-to-first-sample, which still wants a real server rather than a stub.
 4. **Two nodes at 44.1 and 96 crossfaded through the mixer**, on device and
    over Bluetooth. Decide mixer SRC versus `AVAudioConverter` by listening.
 5. **Configuration-change survival**: pull the route mid-crossfade, confirm the

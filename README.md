@@ -97,8 +97,9 @@ Reasoning for each is in [docs/architecture.md](docs/architecture.md).
 - **Gapless detection**: encoder delay/padding metadata, or the host's word.
 - **Android**: the shape is decided (Media3 gives most of this close to free)
   but nothing has been compiled yet.
-- **Replay gain application**: the tags are carried on `Track` and honoured by
-  the queue; the per-track gain is not yet applied to the graph.
+- **Seek cost, measured**: a seek now abandons the request it was waiting on
+  promptly rather than at the HTTP timeout, but time-to-first-sample into an
+  unfetched region has still never been timed end to end. See open question 3.
 
 ## Settled by building
 
