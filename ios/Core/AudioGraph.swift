@@ -17,27 +17,29 @@ import AVFoundation
  two copies of the filter chain, and so changing the curve mid-fade cannot make
  the two halves sound different from each other.
  */
-final class AudioGraph {
+public final class AudioGraph {
 
   /// A source and the gain node it is faded with. Gain is separate from the
   /// player's own `volume` so a crossfade ramp and the user's volume setting
   /// cannot overwrite one another.
-  struct Voice {
-    let player: AVAudioPlayerNode
-    let gain: AVAudioMixerNode
+  public struct Voice {
+    public let id: Int
+    public let player: AVAudioPlayerNode
+    public let gain: AVAudioMixerNode
   }
 
   private let engine = AVAudioEngine()
   private let eq: AVAudioUnitEQ
-  private(set) var voiceA: Voice
-  private(set) var voiceB: Voice
+  private var fadeTimers: [Int: Timer] = [:]
+  public private(set) var voiceA: Voice
+  public private(set) var voiceB: Voice
 
   /// Which voice is currently the foreground one. The other is the one being
   /// prepared, or fading out.
-  private(set) var activeIsA = true
+  public private(set) var activeIsA = true
 
-  var activeVoice: Voice { activeIsA ? voiceA : voiceB }
-  var idleVoice: Voice { activeIsA ? voiceB : voiceA }
+  public var activeVoice: Voice { activeIsA ? voiceA : voiceB }
+  public var idleVoice: Voice { activeIsA ? voiceB : voiceA }
 
   /**
    The rate the EQ and mixer run at, in `fixed` mode.
@@ -52,38 +54,57 @@ final class AudioGraph {
    96kHz one. What cannot happen mid-fade is changing the *hardware* rate; see
    `reconnectIdleVoice`.
    */
-  static let fixedSampleRate: Double = 48_000
+  public static let fixedSampleRate: Double = 48_000
 
-  init(sampleRate: Double = AudioGraph.fixedSampleRate) {
+  public init(sampleRate: Double = AudioGraph.fixedSampleRate) {
     eq = AVAudioUnitEQ(numberOfBands: 10)
     eq.globalGain = 0
 
-    voiceA = Voice(player: AVAudioPlayerNode(), gain: AVAudioMixerNode())
-    voiceB = Voice(player: AVAudioPlayerNode(), gain: AVAudioMixerNode())
+    voiceA = Voice(id: 0, player: AVAudioPlayerNode(), gain: AVAudioMixerNode())
+    voiceB = Voice(id: 1, player: AVAudioPlayerNode(), gain: AVAudioMixerNode())
 
     let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
 
+    // Attach before connecting, always: connecting a node the engine does not
+    // hold yet fails at run time with a bare assertion about `_nodes`, and
+    // nothing about that message points at the ordering.
+    engine.attach(eq)
     for voice in [voiceA, voiceB] {
       engine.attach(voice.player)
       engine.attach(voice.gain)
+    }
+
+    // The two voices meet at the main mixer, not at the EQ. An AVAudioUnitEQ
+    // has a single input bus, so connecting both gains to it does not sum them
+    // — the second connection replaces the first, and one voice goes silent.
+    // Summing is a mixer's job; the mixer is also the one node here that takes
+    // any number of inputs.
+    //
+    //   playerA → gainA ─┐
+    //                    ├→ mainMixer → eq → output
+    //   playerB → gainB ─┘
+    //
+    // EQ after the mixer, so a crossfade runs one filter chain rather than two
+    // and a curve change mid-fade cannot make the halves differ.
+    for voice in [voiceA, voiceB] {
       engine.connect(voice.player, to: voice.gain, format: format)
-      engine.connect(voice.gain, to: eq, format: format)
+      engine.connect(voice.gain, to: engine.mainMixerNode, format: format)
       voice.gain.outputVolume = 0
     }
-    engine.attach(eq)
-    engine.connect(eq, to: engine.mainMixerNode, format: format)
+    engine.connect(engine.mainMixerNode, to: eq, format: format)
+    engine.connect(eq, to: engine.outputNode, format: format)
 
     // Full scale on the active voice; the fade is done on the per-voice gain.
     voiceA.gain.outputVolume = 1
   }
 
-  func start() throws {
+  public func start() throws {
     guard !engine.isRunning else { return }
     engine.prepare()
     try engine.start()
   }
 
-  func stop() {
+  public func stop() {
     engine.stop()
   }
 
@@ -96,12 +117,12 @@ final class AudioGraph {
    position afterwards; there is no way to recover the buffers that were in
    flight.
    */
-  func handleConfigurationChange() throws {
+  public func handleConfigurationChange() throws {
     try start()
   }
 
   /// Swap which voice is foreground. Called at the crossover point.
-  func swapVoices() {
+  public func swapVoices() {
     activeIsA.toggle()
   }
 
@@ -114,7 +135,7 @@ final class AudioGraph {
    Reconnecting the live one would glitch, which is the whole reason the swap
    happens on a pair rather than on a single node being reconfigured in place.
    */
-  func reconnectIdleVoice(toSourceRate rate: Double) {
+  public func reconnectIdleVoice(toSourceRate rate: Double) {
     guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2) else { return }
     let voice = idleVoice
     engine.disconnectNodeOutput(voice.player)
@@ -127,7 +148,7 @@ final class AudioGraph {
    An untouched EQ costs nothing: with every band flat the unit is bypassed
    outright rather than left in the chain multiplying by one.
    */
-  func setEqualizer(bands: [(frequency: Float, gainDb: Float, q: Float)]) {
+  public func setEqualizer(bands: [(frequency: Float, gainDb: Float, q: Float)]) {
     guard !bands.isEmpty, bands.contains(where: { $0.gainDb != 0 }) else {
       eq.bypass = true
       return
@@ -148,17 +169,108 @@ final class AudioGraph {
     }
   }
 
-  // MARK: - Gain
+  // MARK: - Gain and fades
 
   /**
-   Ramp a voice's gain over `duration`, on the audio thread's clock rather than
-   a timer, so a fade stays sample-accurate while the app is backgrounded and
-   its timers are being throttled.
+   Move a voice's gain toward `target` over `duration`, in steps.
+
+   `AVAudioMixerNode` has no ramp of its own, so the fade is stepped. Two
+   choices worth stating:
+
+   **Equal power, not linear.** Two linear ramps crossing at their midpoint sum
+   to about 0.5 of full amplitude, and the crossover is audibly a dip. Taking
+   the square root of the linear position keeps the summed power roughly
+   constant, which is what makes a crossfade sound like one sound becoming
+   another rather than one dipping and another rising.
+
+   **Stepped on a timer, and the step is coarse.** A sample-accurate ramp would
+   need a render callback; at ~50 steps a second the granularity is inaudible
+   for a fade measured in seconds. If that ever proves wrong, the fix is a
+   custom `AVAudioSourceNode` rather than a faster timer.
    */
-  func ramp(_ voice: Voice, to target: Float, over duration: TimeInterval) {
-    // AVAudioMixerNode has no built-in ramp; the scheduler drives it. Kept
-    // behind this call so the implementation can change without callers caring.
-    voice.gain.outputVolume = target
-    _ = duration
+  public func fade(_ voice: Voice, to target: Float, over duration: TimeInterval,
+            completion: (() -> Void)? = nil) {
+    fadeTimers[voice.id]?.invalidate()
+
+    guard duration > 0.01 else {
+      voice.gain.outputVolume = target
+      completion?()
+      return
+    }
+
+    let start = voice.gain.outputVolume
+    let startedAt = CACurrentMediaTime()
+    let interval = 0.02
+
+    let timer = Timer(timeInterval: interval, repeats: true) { [weak self] timer in
+      let elapsed = CACurrentMediaTime() - startedAt
+      let position = Float(min(1.0, elapsed / duration))
+      // Equal power: sqrt of the linear position on the way up, and its mirror
+      // on the way down, so the two halves of a crossfade sum to constant power.
+      let shaped = target > start ? sqrt(position) : 1 - sqrt(1 - (1 - position))
+      voice.gain.outputVolume = start + (target - start) * shaped
+
+      if position >= 1 {
+        voice.gain.outputVolume = target
+        timer.invalidate()
+        self?.fadeTimers[voice.id] = nil
+        completion?()
+      }
+    }
+    fadeTimers[voice.id] = timer
+    RunLoop.main.add(timer, forMode: .common)
+  }
+
+  /// Cut a voice immediately, but over a couple of milliseconds rather than
+  /// truly instantly — a hard jump in amplitude is an audible click.
+  public func cut(_ voice: Voice, to target: Float) {
+    fade(voice, to: target, over: 0.015)
+  }
+
+  // MARK: - Offline rendering
+  //
+  // Lets the whole graph be rendered without audio hardware, which is what
+  // makes it testable at all: the alternative is a device and a pair of ears.
+
+  public func startOffline(sampleRate: Double = AudioGraph.fixedSampleRate,
+                    maximumFrameCount: AVAudioFrameCount = 4096) throws {
+    let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
+    engine.stop()
+    try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: maximumFrameCount)
+    engine.prepare()
+    try engine.start()
+  }
+
+  /// Render `frames` frames and hand back what came out.
+  public func renderOffline(frames: AVAudioFrameCount) throws -> AVAudioPCMBuffer {
+    guard let format = engine.manualRenderingFormat as AVAudioFormat?,
+          let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else {
+      throw NSError(domain: "AudioGraph", code: -1)
+    }
+    var rendered: AVAudioFrameCount = 0
+    while rendered < frames {
+      let chunk = min(engine.manualRenderingMaximumFrameCount, frames - rendered)
+      guard let slice = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunk) else { break }
+      let status = try engine.renderOffline(chunk, to: slice)
+      guard status == .success || status == .insufficientDataFromInputNode else { break }
+      if slice.frameLength == 0 { break }
+      output.append(slice)
+      rendered += slice.frameLength
+    }
+    return output
+  }
+}
+
+private extension AVAudioPCMBuffer {
+  /// Concatenate, for accumulating offline render output.
+  func append(_ other: AVAudioPCMBuffer) {
+    guard let dst = floatChannelData, let src = other.floatChannelData else { return }
+    let room = frameCapacity - frameLength
+    let count = min(room, other.frameLength)
+    guard count > 0 else { return }
+    for channel in 0..<Int(format.channelCount) {
+      memcpy(dst[channel] + Int(frameLength), src[channel], Int(count) * MemoryLayout<Float>.size)
+    }
+    frameLength += count
   }
 }
