@@ -91,6 +91,46 @@ final class AudioGraphTests: XCTestCase {
   }
 
   /**
+   A cut takes effect without a run loop spinning.
+
+   It used to run a 15ms fade, which meant it depended on a timer, which meant
+   that anywhere no run loop was running — offline rendering here, and any
+   caller on a queue in production — the cut simply never happened. Silent, and
+   only in the places hardest to look at.
+   */
+  func testCutTakesEffectImmediately() throws {
+    let graph = AudioGraph()
+    try graph.startOffline()
+    graph.cut(graph.activeVoice, to: 0.25)
+    XCTAssertEqual(graph.activeVoice.gain.outputVolume, 0.25)
+  }
+
+  /**
+   Replay gain and a fade are two multiplications in one path, not one setting
+   fighting another.
+
+   This is the whole reason track gain is applied to the player node and fades
+   to the voice's mixer. Written on the same node, every fade ramp would erase
+   the loudness adjustment on its way past — silently, and only for tracks that
+   happened to be crossfaded.
+   */
+  func testTrackGainAndFadeMultiplyRatherThanClobber() throws {
+    let graph = AudioGraph()
+    try graph.startOffline()
+    graph.activeVoice.player.scheduleBuffer(tone(seconds: 2))
+    graph.activeVoice.player.play()
+
+    let full = rms(try graph.renderOffline(frames: 4096))
+
+    graph.setTrackGain(graph.activeVoice, to: 0.5)
+    graph.cut(graph.activeVoice, to: 0.5)
+    _ = try graph.renderOffline(frames: 8192)   // let the mixer's glide settle
+    let both = rms(try graph.renderOffline(frames: 4096))
+
+    XCTAssertEqual(both / full, 0.25, accuracy: 0.03)
+  }
+
+  /**
    The reason the whole project exists, measured.
 
    Two voices playing at once, one fading out and one fading in. The thing that

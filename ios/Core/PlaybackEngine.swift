@@ -58,6 +58,21 @@ public final class PlaybackEngine {
 
   public var onEvent: ((Event) -> Void)?
 
+  /**
+   Loudness normalisation. Off until the host says otherwise.
+
+   Changing it takes effect on the track already playing as well as the next
+   one. The alternative — settling in only at the next track boundary — makes
+   the setting feel broken: someone turns it on precisely because what they are
+   hearing right now is too loud.
+   */
+  public var replayGain: ReplayGainSettings = .off {
+    didSet {
+      guard replayGain != oldValue, let track = queue.activeTrack else { return }
+      graph.setTrackGain(graph.activeVoice, to: ReplayGain.linearGain(for: track, settings: replayGain))
+    }
+  }
+
   public init(
     graph: AudioGraph,
     factory: TrackReaderFactory,
@@ -216,6 +231,7 @@ public final class PlaybackEngine {
     playback.onEndOfTrack = { [weak self] in self?.handleTrackFinished() }
     activePlayback = playback
 
+    graph.setTrackGain(graph.activeVoice, to: ReplayGain.linearGain(for: track, settings: replayGain))
     graph.cut(graph.activeVoice, to: 1)
     try playback.start(atFrame: frame)
     trackStartedAt = Date()
@@ -278,6 +294,10 @@ public final class PlaybackEngine {
 
       let incoming = TrackPlayback(reader: reader, voice: graph.idleVoice, label: "decode.incoming")
       incomingPlayback = incoming
+      // Set before the fade begins, not at the crossover: a track arriving at
+      // the wrong loudness and being corrected halfway through the fade is
+      // audible in a way that the correction itself is supposed to prevent.
+      graph.setTrackGain(graph.idleVoice, to: ReplayGain.linearGain(for: next, settings: replayGain))
       try incoming.start(atFrame: 0)
 
       let outgoing = activePlayback

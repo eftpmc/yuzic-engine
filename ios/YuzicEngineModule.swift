@@ -105,6 +105,17 @@ public final class YuzicEngineModule: Module {
       })
     }
 
+    /**
+     Loudness normalisation, from the host's tags.
+
+     The engine never measures loudness itself: measuring means decoding a
+     whole track before it can play, which is the thing this player exists not
+     to do. The figures are already in the files.
+     */
+    AsyncFunction("setReplayGain") { (options: ReplayGainRecord) in
+      self.engine?.replayGain = options.asSettings
+    }
+
     AsyncFunction("setCrossfade") { (options: CrossfadeRecord?) in
       self.engine?.queue.crossfade = options?.asSettings
     }
@@ -235,6 +246,13 @@ struct EqBandRecord: Record {
   @Field var q: Double?
 }
 
+struct ReplayGainRecord: Record {
+  @Field var mode: String = "off"
+  @Field var preampDb: Double = 0
+  @Field var untaggedPreampDb: Double = 0
+  @Field var preventClipping: Bool = true
+}
+
 struct CrossfadeRecord: Record {
   @Field var durationSec: Double = 0
   @Field var mode: String = "gapless-aware"
@@ -276,6 +294,19 @@ extension BrowseNodeRecord {
       subtitle: subtitle,
       artworkUri: artworkUri,
       playable: playable?.asTrack
+    )
+  }
+}
+
+extension ReplayGainRecord {
+  var asSettings: ReplayGainSettings {
+    ReplayGainSettings(
+      // An unrecognised mode means off rather than a guess: silently applying
+      // an adjustment nobody asked for is worse than applying none.
+      mode: ReplayGainMode(rawValue: mode) ?? .off,
+      preampDb: preampDb,
+      untaggedPreampDb: untaggedPreampDb,
+      preventClipping: preventClipping
     )
   }
 }

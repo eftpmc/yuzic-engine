@@ -169,6 +169,19 @@ public final class AudioGraph {
     }
   }
 
+  /**
+   Set a voice's per-track loudness adjustment.
+
+   Applied to the *player* rather than the voice's gain node, which is the only
+   reason replay gain and crossfade can coexist: a fade ramps `gain
+   .outputVolume` from 0 to 1 and back, and anything else written there is
+   overwritten by the next ramp. Two separate multiplications in the same
+   signal path, neither able to clobber the other.
+   */
+  public func setTrackGain(_ voice: Voice, to gain: Float) {
+    voice.player.volume = gain
+  }
+
   // MARK: - Gain and fades
 
   /**
@@ -190,6 +203,17 @@ public final class AudioGraph {
    */
   public func fade(_ voice: Voice, to target: Float, over duration: TimeInterval,
             completion: (() -> Void)? = nil) {
+    // A fade can be started from the decode queue — end-of-track is discovered
+    // there — and `RunLoop` is not thread-safe. Scheduling a timer on the main
+    // run loop from another thread is the kind of race that works in testing
+    // and fails once, in a car.
+    guard Thread.isMainThread else {
+      DispatchQueue.main.async { [weak self] in
+        self?.fade(voice, to: target, over: duration, completion: completion)
+      }
+      return
+    }
+
     fadeTimers[voice.id]?.invalidate()
 
     guard duration > 0.01 else {
@@ -221,10 +245,23 @@ public final class AudioGraph {
     RunLoop.main.add(timer, forMode: .common)
   }
 
-  /// Cut a voice immediately, but over a couple of milliseconds rather than
-  /// truly instantly — a hard jump in amplitude is an audible click.
+  /**
+   Cut a voice immediately.
+
+   This used to run a 15ms fade to avoid a click, which was solving a problem
+   the mixer already solves: `AVAudioMixerNode` glides volume changes rather
+   than stepping them — measurable, and measured, in
+   `testGainIsHonoured`. A 15ms fade at 20ms steps was never more than one step
+   anyway.
+
+   What the fade did add was a dependency on a running run loop, which meant a
+   cut silently never completed anywhere one was not spinning. Setting the
+   value is both simpler and more reliable.
+   */
   public func cut(_ voice: Voice, to target: Float) {
-    fade(voice, to: target, over: 0.015)
+    fadeTimers[voice.id]?.invalidate()
+    fadeTimers[voice.id] = nil
+    voice.gain.outputVolume = target
   }
 
   // MARK: - Offline rendering
