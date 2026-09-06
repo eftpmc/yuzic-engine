@@ -79,6 +79,28 @@ final class PlaybackEngineTests: XCTestCase {
     return (PlaybackEngine(graph: graph, factory: factory), factory, graph)
   }
 
+  /**
+   Resuming restores a voice something else faded away.
+
+   The sleep timer fades to silence and pauses, which leaves the gain at zero.
+   Resuming without restoring it plays a track nobody can hear while the
+   progress bar advances normally — and that reads as a broken player rather
+   than a sleep timer that worked.
+   */
+  func testResumingAfterAFadeToSilenceIsAudible() throws {
+    let (engine, _, graph) = try makeEngine()
+    engine.setQueue([song("a")], startIndex: 0)
+    try engine.play()
+
+    // What the sleep timer leaves behind.
+    graph.cut(graph.activeVoice, to: 0)
+    engine.pause()
+    XCTAssertEqual(graph.activeVoice.gain.outputVolume, 0)
+
+    try engine.play()
+    XCTAssertEqual(graph.activeVoice.gain.outputVolume, 1)
+  }
+
   func testPlayingOpensTheTrackAtTheStartIndex() throws {
     let (engine, factory, _) = try makeEngine()
     engine.setQueue([song("a"), song("b"), song("c")], startIndex: 1)

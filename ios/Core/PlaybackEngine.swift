@@ -158,6 +158,18 @@ public final class PlaybackEngine {
     if activePlayback == nil {
       try beginTrack(at: queue.activeIndex, fromFrame: 0)
     } else {
+      // Restore the voice, because something may have faded it away while it
+      // was paused. The sleep timer does exactly that: it fades to silence and
+      // pauses, leaving the gain at zero. Without this, play the next morning
+      // resumes a track nobody can hear, with the progress bar advancing
+      // normally — which reads as a broken player rather than a sleep timer
+      // that did its job.
+      //
+      // Skipped mid-transition, where both voices are deliberately part-way
+      // through a ramp and slamming one to full would be audible.
+      if !transitioning {
+        graph.cut(graph.activeVoice, to: 1)
+      }
       activePlayback?.resume()
       state = .playing
       publishNowPlaying()
