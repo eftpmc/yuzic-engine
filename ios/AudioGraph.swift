@@ -40,12 +40,17 @@ final class AudioGraph {
   var idleVoice: Voice { activeIsA ? voiceB : voiceA }
 
   /**
-   The rate everything is converted into, in `fixed` mode.
+   The rate the EQ and mixer run at, in `fixed` mode.
 
    48kHz because that is what iOS hardware most often runs at natively, so the
-   common case is a no-op rather than a resample. Tracks at other rates are
-   converted on the connection; `AVAudioEngine` inserts the converter itself
-   when the formats of two connected nodes differ.
+   common case is a no-op rather than a resample.
+
+   Note what this is *not*: it is not a requirement that both sources share it.
+   Apple's guidance is to connect each player node at its own track's rate and
+   let `AVAudioMixerNode` convert — it sums once and converts once, which is
+   cheaper than converting per node — so a 44.1kHz track can crossfade into a
+   96kHz one. What cannot happen mid-fade is changing the *hardware* rate; see
+   `reconnectIdleVoice`.
    */
   static let fixedSampleRate: Double = 48_000
 
@@ -82,9 +87,38 @@ final class AudioGraph {
     engine.stop()
   }
 
+  /**
+   Rebuild after the system pulled the rug out.
+
+   `AVAudioEngineConfigurationChangeNotification` fires on every route change —
+   AirPods connecting, CarPlay, a dock — and it stops the engine and discards
+   every scheduled buffer. The caller has to reschedule from the current decode
+   position afterwards; there is no way to recover the buffers that were in
+   flight.
+   */
+  func handleConfigurationChange() throws {
+    try start()
+  }
+
   /// Swap which voice is foreground. Called at the crossover point.
   func swapVoices() {
     activeIsA.toggle()
+  }
+
+  /**
+   Point the idle voice at a new source rate, ready for the track about to
+   start.
+
+   A connection's format cannot be changed while the engine is running, so this
+   only ever touches the voice that is *not* playing, during the preload window.
+   Reconnecting the live one would glitch, which is the whole reason the swap
+   happens on a pair rather than on a single node being reconfigured in place.
+   */
+  func reconnectIdleVoice(toSourceRate rate: Double) {
+    guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2) else { return }
+    let voice = idleVoice
+    engine.disconnectNodeOutput(voice.player)
+    engine.connect(voice.player, to: voice.gain, format: format)
   }
 
   // MARK: - Equalizer

@@ -1,6 +1,6 @@
 # Architecture
 
-Eight decisions, taken before the native code went in, each with the reason it
+Nine decisions, taken before the native code went in, each with the reason it
 went that way. Anything that contradicts one of these is either a mistake or
 a decision to revisit here first.
 
@@ -36,6 +36,42 @@ problems. The engine fetches to the cache and plays from the cache, for local
 and remote alike. One path, and the buffering policy is ours: how much before
 we start, how far ahead we read, what a seek past the buffer does.
 
+### Not `AVAudioFile` — a random-access byte provider
+
+The obvious reading of "plays files" is `AVAudioFile`, and that does not work
+on a file still being written. Two blockers, both in its own header:
+
+- `length` is computed once at open and never re-derived, so a partial file
+  reports a partial length and `scheduleSegment` honours it and stops early.
+- Reading past the current end is a **short read, not an error** — you get
+  `frameLength == 0`, indistinguishable from real end-of-file. There is no
+  "would block" signal, so the only recovery is closing and reopening on every
+  underrun, re-paying the parse each time.
+
+So the reader is the callback-based Core Audio file layer instead:
+
+```
+sparse disk cache + ranged URLSession
+        ↓  AudioFile_ReadProc / AudioFile_GetSizeProc  (blocking, own thread)
+AudioFileOpenWithCallbacks
+        ↓  ExtAudioFileWrapAudioFileID
+ExtAudioFileSeek / ExtAudioFileRead → AVAudioPCMBuffer
+        ↓  scheduleBuffer
+AVAudioPlayerNode → EQ → mixer → output
+```
+
+`AudioFile_ReadProc` is random-access — it is handed an offset, not a cursor —
+and `GetSizeProc` answers with the full size from `Content-Length`. So the
+parser believes the file is whole from the first frame, and **a seek past the
+fetched region stops being a special case**: Core Audio asks for bytes at the
+target, the read proc issues a ranged GET and blocks until they land. Identical
+code path to a local file.
+
+The read proc has no async form, so all reads run on a dedicated producer
+thread keeping a few seconds of PCM queued ahead. A stalled network read then
+costs buffer-ahead, not a dropout — provided seeking can abandon an in-flight
+blocking read promptly, which is the part to get right.
+
 What this genuinely costs:
 
 - Range requests, so a seek past the fetched region doesn't wait for the whole
@@ -43,14 +79,24 @@ What this genuinely costs:
 - A start threshold — begin playing at N seconds buffered, not at complete.
 - Care with long content. A three-hour DJ set must not have to land entirely
   before it plays.
+- **Non-faststart M4A**: when `moov` sits at the tail, the parser's first read
+  is near the end of the file. That is correct behaviour for a random-access
+  reader, but it means the cache and prefetch must not assume sequential access.
 
 Android could have kept the simpler road here: Media3's `SimpleCache` and
 `CacheDataSource` do this already and well. It uses the same fetch-to-cache path
 anyway, because two caching models would mean two sets of behaviour to reason
 about, and the offline-downloads store has to interoperate with exactly one.
 
-**This is the biggest unknown in the project.** It deserves a spike before the
-rest of the iOS work.
+Rejected on the way here: an `AVAssetResourceLoader` delegate (it feeds
+`AVPlayer`, and there is no supported route from an `AVURLAsset` to a player
+node), and a local HTTP proxy (adds a socket, a background-execution liability
+and a port-collision surface, in exchange for nothing the read proc doesn't
+give free).
+
+Prior art worth reading before writing any of this: **SFBAudioEngine** (MIT,
+so both readable and usable) drives an `AVAudioEngine` graph with its own
+decoders and does gapless already.
 
 ## 3. The queue lives natively
 
@@ -145,29 +191,96 @@ one global choice and are therefore wrong half the time.
 The graph runs at 48kHz and converts into it: that is what iOS hardware most
 often runs natively, so the common case is a no-op rather than a resample.
 
-`match-source` reconfigures the session per track for true bit-perfect output.
-It is not a free upgrade, because of a structural collision worth stating
-plainly:
+**Correction to an earlier version of this document.** It claimed overlapping
+sources must share a sample rate. That is wrong: Apple's own guidance is to
+connect each player node to the mixer *at its own track's rate* and let
+`AVAudioMixerNode` do the conversion — it sums once and converts once, which is
+cheaper than converting per node. So crossfading 44.1kHz into 96kHz is fine.
 
-> Overlapping sources must share a sample rate, and changing the session rate
-> requires stopping the engine. **Matching the source and crossfading are
-> mutually exclusive.**
+The real collision is with the **hardware** rate. `setPreferredSampleRate` is
+what bit-perfect output requires, and changing it fires
+`AVAudioEngineConfigurationChangeNotification`, which stops the engine and
+clears every scheduled buffer. Mid-fade that is a guaranteed audible break.
 
-The engine enforces that rather than letting two settings quietly contradict
-each other: turning on `match-source` clears crossfade and emits an error event
-saying so. Also worth knowing before choosing it — iOS hardware commonly runs
-at 48kHz and Bluetooth imposes its own rate regardless, so bit-perfect only
-means anything over wired output or a USB DAC.
+> **Matching the hardware rate to the source can only happen at a track start
+> with nothing fading.** It is not compatible with a crossfade in progress.
+
+So `match-source` still clears crossfade and says so, but for the accurate
+reason. Two consequences for the graph:
+
+- A connection's format cannot be changed while the engine runs, so the pool of
+  player nodes is reconnected at the incoming track's rate during the *preload*
+  window — never the node that is currently playing.
+- The mixer's conversion quality is not adjustable. If mixer SRC disappoints on
+  96→48, convert at decode time with `AVAudioConverter`, which does expose
+  quality, algorithm and dither.
+
+Register for the configuration-change notification regardless and rebuild from
+the current decode position: it fires on every AirPods, CarPlay and dock
+transition, not only on rate changes of our own making.
+
+Also worth knowing before choosing it — iOS hardware commonly runs at 48kHz and
+Bluetooth imposes its own rate regardless, so bit-perfect only means anything
+over wired output or a USB DAC.
+
+## 9. Core Audio does not cover the formats, and its FLAC seeking is broken
+
+Two findings that change what has to be built, both from the research spike.
+
+**Ogg has no Core Audio container.** FLAC and Opus decode natively from iOS 11
+(`kAudioFormatFLAC`, `kAudioFormatOpus`), and raw `.flac` opens fine. But the
+`AudioFileTypeID` list has no Ogg member, so **Opus-in-Ogg — which is what a
+`.opus` file off a Subsonic server is — will not open at all**, and Ogg Vorbis
+is unsupported at any version. Those need bundled decoders (libogg, libvorbis,
+libopus) and a second, parallel code path. Budget for it rather than finding it
+late.
+
+**Apple's FLAC and MP3 decoders ignore the seek structures in the file.** They
+decode from byte zero instead of using FLAC's `SEEKTABLE` or MP3's Xing/LAME
+TOC, so seek cost is linear in distance. Measured on a 75-minute file, seeking
+to the midpoint:
+
+| format | local | over network |
+| --- | --- | --- |
+| WAV | 0.0005 s | 0.007 s |
+| ALAC | 0.0011 s | 0.015 s |
+| MP3 | 0.196 s | 9.2 s |
+| **FLAC** | **0.753 s** | **30.2 s** |
+
+`FLAC__stream_decoder_seek_absolute()` does the same seek in ~0.015 s. For a
+self-hosted FLAC library — which is exactly yuzic's audience — that is the
+difference between a working scrubber and an unusable one, and it applies to
+any design sitting on Apple's decoder.
+
+The mitigation is the same bundled libFLAC that Ogg support already argues for,
+leaving Core Audio to handle MP3, AAC/M4A, ALAC and WAV.
+
+**Caveat on the measurement**: reported on macOS 26 with no Apple response, and
+not independently confirmed on current iOS. Likely shared, but unverified —
+which is why reproducing it is the first thing the spike does.
 
 ## What is not decided yet
 
-- **The iOS cache.** The one genuinely open question, and the biggest risk in
-  the project: how remote audio gets to disk such that playback can start
-  before the file is complete and a seek past the fetched region works.
-  Candidates are an `AVAssetResourceLoader` delegate, a local HTTP proxy, or a
-  plain ranged fetcher of our own feeding `AVAudioFile`. Under research; the
-  graph work above does not depend on the answer.
-- **Whether `AVAudioFile` tolerates a file still being appended to**, which
-  decides whether the fetcher can be as simple as "write and read behind".
-- **Native decoding coverage** — FLAC and Opus in particular — and whether a
-  third-party decoder is needed for any format yuzic's users actually hold.
+The architecture above is settled. What remains is empirical, and there is a
+spike to run before the iOS reader is written. In order, the first two being
+go/no-go:
+
+1. **Does the FLAC/MP3 slow-seek defect reproduce on current iOS, on device?**
+   Time seek-and-read at 10/50/90% of a 60-minute FLAC and MP3 against WAV and
+   ALAC baselines. This one number decides whether libFLAC is day-one work.
+2. **Does `AudioFileOpenWithCallbacks` + `ExtAudioFileWrapAudioFileID` decode a
+   partial file** when `GetSizeProc` reports the full size and `ReadProc`
+   blocks for absent ranges? Per format, including non-faststart M4A.
+3. **Seek into an unfetched region**: time-to-first-sample end to end, and
+   confirm an in-flight blocking read cancels in bounded time.
+4. **Two nodes at 44.1 and 96 crossfaded through the mixer**, on device and
+   over Bluetooth. Decide mixer SRC versus `AVAudioConverter` by listening.
+5. **Configuration-change survival**: pull the route mid-crossfade, confirm the
+   rebuild resumes at the right frame with nothing repeated or dropped.
+6. **Against real servers**: does Navidrome's `/rest/stream` honour `Range` and
+   send `Content-Length` when it is transcoding on the fly? If not, the cache
+   sources from `/rest/download` instead. Verify rather than assume.
+7. **Thermal and battery** with two hi-res decoders live during a crossfade.
+
+If (2) fails for a given format, that format falls back to fetch-to-complete —
+a degradation, not a redesign.
