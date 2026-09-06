@@ -35,6 +35,12 @@ public final class HTTPByteFetcher: ByteFetcher, @unchecked Sendable {
 
   private var cachedLength: Int64?
 
+  /// Guards the two fields below, which a cancel touches from the seeking
+  /// thread while `perform` is parked on its semaphore.
+  private let state = NSLock()
+  private var inFlight: URLSessionDataTask?
+  private var cancelled = false
+
   public init(
     url: URL,
     headers: [String: String] = [:],
@@ -111,28 +117,83 @@ public final class HTTPByteFetcher: ByteFetcher, @unchecked Sendable {
     }
   }
 
+  /**
+   Abandon the request in flight, and refuse to start another until `resume`.
+
+   A seek is the caller here. Without this the semaphore below is waited on
+   unconditionally, so a seek issued while a window is being fetched costs the
+   rest of that request — up to `timeout`, and on a stalled connection that is
+   the whole 30 seconds. Cancelling the task makes URLSession fire the
+   completion handler with an error almost immediately, which signals the
+   semaphore and lets the read throw.
+
+   The flag matters as much as the cancellation: `ensure` fetches in a loop, so
+   without it the next window would be requested before the seek has had a
+   chance to point the source somewhere else.
+   */
+  public func cancel() {
+    state.lock()
+    cancelled = true
+    let task = inFlight
+    state.unlock()
+    task?.cancel()
+  }
+
+  public func resume() {
+    state.lock(); cancelled = false; state.unlock()
+  }
+
   private func perform(_ request: URLRequest) throws -> (Data, HTTPURLResponse) {
     let semaphore = DispatchSemaphore(value: 0)
-    var result: Result<(Data, HTTPURLResponse), Error>?
+    let box = ResultBox()
 
     let task = session.dataTask(with: request) { data, response, error in
       if let error {
-        result = .failure(HTTPFetchError.transport(String(describing: error)))
+        box.value = .failure(Self.isCancellation(error)
+          ? ByteSourceError.cancelled
+          : HTTPFetchError.transport(String(describing: error)))
       } else if let http = response as? HTTPURLResponse {
-        result = .success((data ?? Data(), http))
+        box.value = .success((data ?? Data(), http))
       } else {
-        result = .failure(HTTPFetchError.transport("no response"))
+        box.value = .failure(HTTPFetchError.transport("no response"))
       }
       semaphore.signal()
     }
+
+    state.lock()
+    // Checked under the same lock that `cancel` takes, so a cancel arriving
+    // between the check and the store cannot be missed: either it sees the
+    // task and cancels it, or it sets the flag before we look.
+    if cancelled { state.unlock(); throw ByteSourceError.cancelled }
+    inFlight = task
+    state.unlock()
+
     task.resume()
     semaphore.wait()
 
-    switch result {
+    state.lock()
+    if inFlight === task { inFlight = nil }
+    state.unlock()
+
+    switch box.value {
     case .success(let pair): return pair
     case .failure(let error): throw error
     case nil: throw HTTPFetchError.transport("no result")
     }
+  }
+
+  /// The completion handler writes this from the session's queue while
+  /// `perform` reads it after the semaphore; the signal is the barrier, but the
+  /// box keeps the compiler's concurrency checking honest about the capture.
+  private final class ResultBox: @unchecked Sendable {
+    var value: Result<(Data, HTTPURLResponse), Error>?
+  }
+
+  /// A cancelled task surfaces as `NSURLErrorCancelled`, and that is a seek
+  /// doing its job — not a transport failure worth reporting as one.
+  private static func isCancellation(_ error: Error) -> Bool {
+    let error = error as NSError
+    return error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled
   }
 
   /// `Content-Range: bytes 0-0/12345` → 12345.

@@ -8,6 +8,27 @@ public protocol ByteFetcher: AnyObject {
   func contentLength() throws -> Int64
   /// Fetch exactly this range. Blocking; called off the render thread.
   func fetch(_ range: Range<Int64>) throws -> Data
+
+  /**
+   Abandon whatever `fetch` is waiting on, and refuse to start another until
+   `resume`.
+
+   The source above can only notice a cancel *between* fetches, so without this
+   a seek arriving mid-request waits out the request — 30 seconds on a stalled
+   connection, for something the listener expects to be instant. The bound has
+   to come from the cancel.
+
+   Defaulted to nothing because a fetcher that cannot block has nothing to
+   abandon: reading a local file returns at disk speed, and the test fakes
+   return immediately. Only the HTTP fetcher genuinely waits.
+   */
+  func cancel()
+  func resume()
+}
+
+public extension ByteFetcher {
+  func cancel() {}
+  func resume() {}
 }
 
 public enum ByteSourceError: Error, Equatable {
@@ -94,10 +115,14 @@ public final class CachedByteSource {
 
   public func cancel() {
     lock.lock(); cancelled = true; lock.unlock()
+    // Outside the lock: the fetcher is free to complete a request from another
+    // thread as it tears down, and that completion wants this lock.
+    fetcher.cancel()
   }
 
   public func resume() {
     lock.lock(); cancelled = false; lock.unlock()
+    fetcher.resume()
   }
 
   /**

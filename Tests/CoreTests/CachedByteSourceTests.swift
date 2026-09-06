@@ -136,4 +136,62 @@ final class CachedByteSourceTests: XCTestCase {
     XCTAssertEqual(source.availableBytes(from: 0), 65536)
     XCTAssertEqual(source.availableBytes(from: 65536), 0)
   }
+
+  /**
+   The case a seek actually hits: the cancel arrives while a window fetch is
+   already in flight.
+
+   `testCancellingUnblocksAReadInsteadOfHanging` covers the easy half, where
+   the flag is already set when the read begins. This is the half that matters
+   — someone scrubbing the progress bar cancels a read that is *waiting on the
+   network*, and if the cancel is only observed between fetches, the seek waits
+   out the HTTP timeout before the first sample of the new position is asked
+   for. The bound has to come from the cancel, not from the request.
+   */
+  func testCancellingUnblocksAReadAlreadyWaitingOnAFetch() {
+    let fetcher = BlockingFetcher(bytes: 1_000_000)
+    let source = CachedByteSource(fetcher: fetcher, windowBytes: 64 * 1024)
+
+    let finished = XCTestExpectation(description: "read returns")
+    DispatchQueue.global().async {
+      do {
+        _ = try source.read(offset: 0, count: 128)
+        XCTFail("read returned bytes it never fetched")
+      } catch {
+        XCTAssertEqual(error as? ByteSourceError, .cancelled)
+      }
+      finished.fulfill()
+    }
+
+    XCTAssertEqual(fetcher.entered.wait(timeout: .now() + 2), .success, "fetch never started")
+    source.cancel()
+
+    // Two seconds is generous for something that should take microseconds, and
+    // still far below the 30s HTTP timeout that is the bound when the cancel
+    // does not reach the fetcher.
+    XCTAssertEqual(XCTWaiter().wait(for: [finished], timeout: 2), .completed)
+  }
+}
+
+/// Blocks inside `fetch` until cancelled, the way a real ranged GET blocks on
+/// the network. Signals `entered` so a test can cancel at the exact moment a
+/// fetch is outstanding.
+private final class BlockingFetcher: ByteFetcher, @unchecked Sendable {
+  let bytes: Int
+  let entered = DispatchSemaphore(value: 0)
+  private let released = DispatchSemaphore(value: 0)
+
+  init(bytes: Int) { self.bytes = bytes }
+
+  func contentLength() throws -> Int64 { Int64(bytes) }
+
+  func fetch(_ range: Range<Int64>) throws -> Data {
+    entered.signal()
+    // Waits effectively forever unless `cancel()` releases it — a fetch that
+    // returned on its own would not test anything.
+    released.wait()
+    throw ByteSourceError.cancelled
+  }
+
+  func cancel() { released.signal() }
 }

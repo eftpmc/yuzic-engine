@@ -164,4 +164,67 @@ final class HTTPByteFetcherTests: XCTestCase {
     XCTAssertEqual(try source.read(offset: 100_000, count: 256), body.subdata(in: 100_000..<100_256))
     XCTAssertEqual(try source.totalBytes(), 200_000)
   }
+
+  /**
+   The same guarantee as `CachedByteSourceTests`, but through the real fetcher
+   and a real `URLSession`, because the part that has to hold is URLSession's:
+   that cancelling a task delivers the completion handler promptly rather than
+   at the request timeout.
+
+   A stalled server is the scenario — headers sent, body never finished — which
+   is what a seek on a bad connection is waiting on when it waits.
+   */
+  func testCancelUnblocksARequestThatIsStalled() {
+    StallingURLProtocol.started = DispatchSemaphore(value: 0)
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [StallingURLProtocol.self]
+    let fetcher = HTTPByteFetcher(
+      url: url,
+      session: URLSession(configuration: config),
+      timeout: 30
+    )
+
+    let finished = XCTestExpectation(description: "fetch returns")
+    DispatchQueue.global().async {
+      do {
+        _ = try fetcher.fetch(0..<1024)
+        XCTFail("a stalled request produced bytes")
+      } catch {
+        XCTAssertEqual(error as? ByteSourceError, .cancelled)
+      }
+      finished.fulfill()
+    }
+
+    XCTAssertEqual(StallingURLProtocol.started.wait(timeout: .now() + 2), .success)
+    fetcher.cancel()
+    XCTAssertEqual(XCTWaiter().wait(for: [finished], timeout: 2), .completed)
+
+    // And it stays cancelled: `ensure` fetches in a loop, so a fetcher that
+    // accepted the next request would put the seek right back where it was.
+    XCTAssertThrowsError(try fetcher.fetch(0..<1024)) { error in
+      XCTAssertEqual(error as? ByteSourceError, .cancelled)
+    }
+  }
+}
+
+/// Answers with headers and then never finishes, the way a connection that has
+/// gone away looks from this side.
+final class StallingURLProtocol: URLProtocol {
+  nonisolated(unsafe) static var started = DispatchSemaphore(value: 0)
+
+  override class func canInit(with request: URLRequest) -> Bool { true }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func stopLoading() {}
+
+  override func startLoading() {
+    let response = HTTPURLResponse(
+      url: request.url!,
+      statusCode: 206,
+      httpVersion: "HTTP/1.1",
+      headerFields: ["Content-Range": "bytes 0-1023/100000", "Content-Length": "1024"]
+    )!
+    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    Self.started.signal()
+    // Deliberately no body and no `urlProtocolDidFinishLoading`.
+  }
 }
