@@ -34,7 +34,7 @@
     "equalizer"
   ],
   "peerDependencies": {
-    "expo-modules-core": "^57.0.16",
+    "expo-modules-core": "*",
     "react": "*",
     "react-native": "*"
   },
@@ -52,5 +52,10 @@
       "/node_modules/",
       "/lib/"
     ]
+  },
+  "peerDependenciesMeta": {
+    "expo-modules-core": {
+      "optional": false
+    }
   }
 }
