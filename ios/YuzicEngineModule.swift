@@ -1,6 +1,11 @@
 import ExpoModulesCore
 import AVFoundation
-import YuzicEngineCore
+
+// No `import YuzicEngineCore` here, and that is not an oversight. The podspec
+// compiles `ios/Core` and this file into a single module, so the core types are
+// already in scope; SwiftPM is the odd one out, splitting Core into its own
+// target so `swift test` can build the logic without an app. Importing it would
+// be correct for the package and wrong for every real build.
 
 /**
  The Expo module surface — the thin part. Everything of substance lives in
