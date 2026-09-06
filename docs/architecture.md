@@ -80,8 +80,15 @@ What this genuinely costs:
 - Care with long content. A three-hour DJ set must not have to land entirely
   before it plays.
 - **Non-faststart M4A**: when `moov` sits at the tail, the parser's first read
-  is near the end of the file. That is correct behaviour for a random-access
-  reader, but it means the cache and prefetch must not assume sequential access.
+  is near the end of the file. Confirmed by the spike — with only the first 30%
+  of an ALAC file present, **the open fails outright**, two of its first ten
+  reads being past the fetched region. WAV and FLAC in the same test open
+  cleanly and report the correct full duration.
+
+  So the cache **fetches the tail before the head for MP4-family files** —
+  roughly the last 64KB. Cheap, because the read proc is random-access already:
+  a prefetch heuristic, not a redesign. But it must not be forgotten, or ALAC
+  and AAC will refuse to start until the whole file has landed.
 
 Android could have kept the simpler road here: Media3's `SimpleCache` and
 `CacheDataSource` do this already and well. It uses the same fetch-to-cache path
@@ -255,9 +262,28 @@ any design sitting on Apple's decoder.
 The mitigation is the same bundled libFLAC that Ogg support already argues for,
 leaving Core Audio to handle MP3, AAC/M4A, ALAC and WAV.
 
-**Caveat on the measurement**: reported on macOS 26 with no Apple response, and
-not independently confirmed on current iOS. Likely shared, but unverified —
-which is why reproducing it is the first thing the spike does.
+**Reproduced, and it is worse than slow seeking.** The spike in
+[`spikes/ios-reader`](../spikes/ios-reader) measured this on macOS 26 with a
+20-minute file. Seek cost is linear in distance, as reported — but the useful
+measurement was not time, it was *which bytes the decoder asks for*:
+
+| format | bytes requested to play from 90% in | range touched |
+| --- | --- | --- |
+| WAV | 16 KB | 186050–186066 KB |
+| **FLAC** | **279,985 KB — 177% of the file** | **13–142,331 KB** |
+| ALAC | 36 KB | 143151–143188 KB |
+
+Apple's FLAC decoder reads from the start of the file to the seek point, some
+regions more than once. **So random access buys nothing for FLAC.** Over a
+network, seeking near the end of a track would fetch the whole track first.
+This is not a performance footnote — it defeats the ranged-fetch design in §2
+outright, for the format this app's audience mostly holds.
+
+libFLAC is therefore **architectural, not an optimisation**. Core Audio keeps
+MP3, AAC/M4A, ALAC and WAV, where seeking is targeted.
+
+Still unconfirmed on an iOS device: the frameworks are shared and the original
+report was also macOS, but nobody has run it on the phone yet.
 
 ## What is not decided yet
 
@@ -265,14 +291,17 @@ The architecture above is settled. What remains is empirical, and there is a
 spike to run before the iOS reader is written. In order, the first two being
 go/no-go:
 
-1. **Does the FLAC/MP3 slow-seek defect reproduce on current iOS, on device?**
-   Time seek-and-read at 10/50/90% of a 60-minute FLAC and MP3 against WAV and
-   ALAC baselines. This one number decides whether libFLAC is day-one work.
-2. **Does `AudioFileOpenWithCallbacks` + `ExtAudioFileWrapAudioFileID` decode a
-   partial file** when `GetSizeProc` reports the full size and `ReadProc`
-   blocks for absent ranges? Per format, including non-faststart M4A.
+1. ~~Does the FLAC slow-seek defect reproduce?~~ **Done — yes**, on macOS.
+   Linear in distance, and it reads 177% of the file to play from 90% in. See
+   §9 and `spikes/ios-reader`. Outstanding: confirm on an iOS device, and test
+   MP3, which could not be encoded on macOS for lack of an encoder.
+2. ~~Does the callback reader decode a partial file?~~ **Done — yes for WAV and
+   FLAC**, opening from the head alone with the correct duration reported.
+   **No for non-faststart M4A**, which needs its tail; the cache gets a
+   tail-first prefetch for MP4-family files.
 3. **Seek into an unfetched region**: time-to-first-sample end to end, and
-   confirm an in-flight blocking read cancels in bounded time.
+   confirm an in-flight blocking read cancels in bounded time. Not yet run —
+   needs the real fetcher, since the spike served bytes from memory.
 4. **Two nodes at 44.1 and 96 crossfaded through the mixer**, on device and
    over Bluetooth. Decide mixer SRC versus `AVAudioConverter` by listening.
 5. **Configuration-change survival**: pull the route mid-crossfade, confirm the
