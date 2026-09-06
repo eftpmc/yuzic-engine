@@ -1,7 +1,7 @@
 {
   "name": "yuzic-engine",
   "version": "0.0.0",
-  "description": "Audio playback engine for yuzic — React Native, built to own crossfade, DSP and caching outright",
+  "description": "Audio playback engine for yuzic \u2014 React Native, built to own crossfade, DSP and caching outright",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -41,6 +41,15 @@
     "@types/jest": "^29.5.12",
     "expo-modules-core": "^57.0.16",
     "jest": "^29.7.0",
+    "ts-jest": "^29.4.12",
     "typescript": "~5.9.2"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/lib/"
+    ]
   }
 }

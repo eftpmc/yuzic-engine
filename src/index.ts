@@ -1,4 +1,5 @@
 export { YuzicEngine } from './YuzicEngine';
+export { transitionDuration } from './transitionDuration';
 export type { AudioEngine, EngineSetupOptions, RemoteCommand } from './AudioEngine';
 export type {
   BrowseNode,
