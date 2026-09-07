@@ -401,16 +401,40 @@ private class EnginePlayer(private val graph: AudioGraph) :
 
   private val active: Player get() = graph.activeVoice.player
 
-  // Only the methods whose answer depends on which voice is live are overridden.
-  // Everything else — the queue, the metadata, the timeline — lives on the
-  // foreground voice, which is also the wrapped one whenever `activeIsA`, so
-  // forwarding is correct there by construction.
+  // Every getter whose answer depends on which voice is live, which since the
+  // engine drives its own advances means *what is loaded* as well as *where
+  // playback is*.
+  //
+  // This block used to cover only the second group, on the stated grounds that
+  // the metadata and timeline "live on the foreground voice, which is also the
+  // wrapped one whenever `activeIsA`". That was true while `swapVoices()` was
+  // never called. It is not true now: the crossfade swaps, so after an odd
+  // number of fades the wrapped player is the *idle* voice, and the session
+  // read its metadata from a track that had finished playing. Observed on
+  // device — the lock screen showed the previous track's title, artist and
+  // album while the current one played, and would have shown it in the car.
+  //
+  // The comment named its own precondition and the precondition quietly
+  // stopped holding, which is why the failure was invisible: nothing about
+  // this file changed.
   override fun getCurrentPosition(): Long = active.currentPosition
   override fun getDuration(): Long = active.duration
   override fun getBufferedPosition(): Long = active.bufferedPosition
   override fun getPlaybackState(): Int = active.playbackState
   override fun getPlayWhenReady(): Boolean = active.playWhenReady
   override fun isPlaying(): Boolean = active.isPlaying
+
+  override fun getCurrentMediaItem(): MediaItem? = active.currentMediaItem
+  override fun getMediaMetadata(): MediaMetadata = active.mediaMetadata
+  override fun getCurrentTimeline(): androidx.media3.common.Timeline = active.currentTimeline
+  override fun getCurrentMediaItemIndex(): Int = active.currentMediaItemIndex
+  override fun getCurrentPeriodIndex(): Int = active.currentPeriodIndex
+  override fun getMediaItemCount(): Int = active.mediaItemCount
+  override fun getContentPosition(): Long = active.contentPosition
+  override fun getContentDuration(): Long = active.contentDuration
+  override fun getContentBufferedPosition(): Long = active.contentBufferedPosition
+  override fun getTotalBufferedDuration(): Long = active.totalBufferedDuration
+  override fun isPlayingAd(): Boolean = active.isPlayingAd
 
   override fun play() {
     // The lock screen and Android Auto reach playback through here, so this
