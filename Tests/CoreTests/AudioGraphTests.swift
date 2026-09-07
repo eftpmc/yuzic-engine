@@ -181,6 +181,69 @@ final class AudioGraphTests: XCTestCase {
    their midpoint sum to about half amplitude, which is audible as a hole in
    the middle of the fade. Equal-power shaping is what avoids it.
    */
+  /**
+   The fade curve itself, which the RMS test below cannot reach.
+
+   `testCrossfadeDoesNotDipInTheMiddle` sets `outputVolume` by hand to
+   `sqrt(0.5)` and renders. That checks the *mixer* sums equal-power gains
+   without dipping — a real property, and one that holds no matter what curve
+   `fade()` computes. It passed throughout a period when the fade-out was
+   inverted, which is the argument for testing the arithmetic directly.
+
+   The bug it missed: an outgoing track that rose from silence over the fade
+   and was then cut to zero at the end. Audible as the outgoing song dipping
+   sharply, the incoming one arriving at full volume with nothing masking it,
+   and then the outgoing one growing *louder* through the fade — reported from
+   a real build before any test caught it.
+   */
+  func testAFadeOutFallsAndAFadeInRises() {
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 0), 1, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 1), 0, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 0, to: 1, position: 0), 0, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 0, to: 1, position: 1), 1, accuracy: 0.001)
+  }
+
+  /// Monotonic, which is the property the inverted curve broke most audibly.
+  func testAFadeOutNeverGetsLouder() {
+    var previous = AudioGraph.fadeVolume(from: 1, to: 0, position: 0)
+    for step in 1...50 {
+      let volume = AudioGraph.fadeVolume(from: 1, to: 0, position: Float(step) / 50)
+      XCTAssertLessThanOrEqual(volume, previous, "the fade-out rose at step \(step)")
+      previous = volume
+    }
+  }
+
+  /**
+   The contract in one line: the two halves sum to constant power.
+
+   This is what "equal power" means and what stops the crossover dipping.
+   Checked across the whole fade rather than only at the midpoint, because the
+   inverted curve happened to be symmetric about it.
+   */
+  func testTheTwoHalvesOfACrossfadeSumToConstantPower() {
+    for step in 0...20 {
+      let position = Float(step) / 20
+      let rising = AudioGraph.fadeVolume(from: 0, to: 1, position: position)
+      let falling = AudioGraph.fadeVolume(from: 1, to: 0, position: position)
+      XCTAssertEqual(rising * rising + falling * falling, 1.0, accuracy: 0.001,
+                     "power was not constant at \(position)")
+    }
+  }
+
+  /// A partial fade — the sleep timer fades to silence from wherever it is.
+  func testAPartialFadeStaysWithinItsEndpoints() {
+    let volume = AudioGraph.fadeVolume(from: 0.5, to: 0, position: 0.5)
+    XCTAssertLessThan(volume, 0.5)
+    XCTAssertGreaterThan(volume, 0)
+  }
+
+  /// Positions outside 0...1 are clamped rather than producing a NaN from
+  /// `sqrt` of a negative.
+  func testPositionsOutsideTheFadeAreClamped() {
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 1.5), 0, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: -0.5), 1, accuracy: 0.001)
+  }
+
   func testCrossfadeDoesNotDipInTheMiddle() throws {
     let graph = AudioGraph()
     try graph.startOffline()

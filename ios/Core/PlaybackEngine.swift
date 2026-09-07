@@ -243,7 +243,7 @@ public final class PlaybackEngine {
     // old producer is still inside it.
     activePlayback?.stopAndWait()
     let playback = TrackPlayback(reader: reader, voice: graph.activeVoice)
-    playback.onEndOfTrack = { [weak self] in self?.handleTrackFinished() }
+    playback.onEndOfTrack = { [weak self, weak playback] in self?.handleTrackFinished(playback) }
     activePlayback = playback
     try playback.start(atFrame: frame)
     state = .playing
@@ -306,7 +306,7 @@ public final class PlaybackEngine {
 
     activeReader = reader
     let playback = TrackPlayback(reader: reader, voice: graph.activeVoice)
-    playback.onEndOfTrack = { [weak self] in self?.handleTrackFinished() }
+    playback.onEndOfTrack = { [weak self, weak playback] in self?.handleTrackFinished(playback) }
     activePlayback = playback
 
     graph.setTrackGain(graph.activeVoice, to: ReplayGain.linearGain(for: track, settings: replayGain))
@@ -322,9 +322,24 @@ public final class PlaybackEngine {
   }
 
   /// Called when a track runs out with no crossfade to carry it.
-  private func handleTrackFinished() {
+  /**
+   A track reached its end. Advance, unless it was not the track being heard.
+
+   `finished` is the playback that ended, and it is checked against the active
+   one rather than trusted. During a crossfade the *outgoing* track keeps
+   playing to its own natural end, several seconds after the crossover has
+   already moved the queue on — so without this it advances a second time and
+   the listener is thrown into a third track.
+
+   `transitioning` does not cover it: that is cleared at the crossover, which
+   is the midpoint of the fade, leaving the whole second half of the window in
+   which the outgoing track can still end with the guard already down. Identity
+   holds whatever the timing.
+   */
+  private func handleTrackFinished(_ finished: TrackPlayback?) {
     DispatchQueue.main.async { [weak self] in
       guard let self, !self.transitioning else { return }
+      guard finished == nil || finished === self.activePlayback else { return }
       let listened = self.listenedSeconds()
       // Asks the queue rather than adding one, so repeat is honoured in the
       // one place it has to be: `.one` returns the same index and the track

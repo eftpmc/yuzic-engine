@@ -256,6 +256,29 @@ public final class AudioGraph {
    for a fade measured in seconds. If that ever proves wrong, the fix is a
    custom `AVAudioSourceNode` rather than a faster timer.
    */
+  /**
+   The gain a fade should be at, a fraction `position` of the way through.
+
+   Equal power, not linear: two linear ramps crossing at their midpoint sum to
+   about 0.5 of full amplitude and the crossover is audibly a dip. Taking the
+   square root of the linear position keeps `rising² + falling² == 1` at every
+   point, which is what makes a crossfade sound like one sound becoming another
+   rather than one dipping and another rising.
+
+   Pure, and separated out because the curve is the part worth testing and the
+   rest is a timer. It is also the part that was wrong: the falling branch read
+   `1 - sqrt(1 - (1 - position))`, whose inner `1 - (1 - position)` collapses to
+   `position`, making it `1 - sqrt(position)` — and once interpolated between
+   start and target that inverted the fade-out, so the outgoing track rose from
+   silence and was cut off at full volume instead of fading away.
+   */
+  public static func fadeVolume(from start: Float, to target: Float, position: Float) -> Float {
+    let p = max(0, min(1, position))
+    return target > start
+      ? start + (target - start) * sqrt(p)
+      : target + (start - target) * sqrt(1 - p)
+  }
+
   public func fade(_ voice: Voice, to target: Float, over duration: TimeInterval,
             completion: (() -> Void)? = nil) {
     // A fade can be started from the decode queue — end-of-track is discovered
@@ -284,10 +307,7 @@ public final class AudioGraph {
     let timer = Timer(timeInterval: interval, repeats: true) { [weak self] timer in
       let elapsed = CACurrentMediaTime() - startedAt
       let position = Float(min(1.0, elapsed / duration))
-      // Equal power: sqrt of the linear position on the way up, and its mirror
-      // on the way down, so the two halves of a crossfade sum to constant power.
-      let shaped = target > start ? sqrt(position) : 1 - sqrt(1 - (1 - position))
-      voice.gain.outputVolume = start + (target - start) * shaped
+      voice.gain.outputVolume = AudioGraph.fadeVolume(from: start, to: target, position: position)
 
       if position >= 1 {
         voice.gain.outputVolume = target
