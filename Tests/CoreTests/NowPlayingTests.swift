@@ -21,6 +21,56 @@ final class NowPlayingTests: XCTestCase {
       isPlaying: isPlaying, rate: rate, isLive: isLive)
   }
 
+  // MARK: - Artwork
+
+  /**
+   The lock screen showing the wrong album.
+
+   `update` deliberately keeps the outgoing track's cover while a new one
+   loads, so the screen does not flicker to grey between tracks. That is right
+   while something is on its way and wrong the moment nothing is — a track with
+   no art would otherwise keep the previous track's cover indefinitely, which
+   does not look like a bug. It looks like art that loaded.
+   */
+  func testATrackWithNoArtworkClearsTheOldCover() {
+    XCTAssertEqual(artworkAction(for: nil, currentlyLoaded: "https://a/1.jpg"), .clear)
+  }
+
+  /// An empty string is a missing cover, not a URL to fetch.
+  func testAnEmptyUriIsTreatedAsNoArtwork() {
+    XCTAssertEqual(artworkAction(for: "", currentlyLoaded: "https://a/1.jpg"), .clear)
+  }
+
+  func testANewCoverIsLoaded() {
+    XCTAssertEqual(
+      artworkAction(for: "https://a/2.jpg", currentlyLoaded: "https://a/1.jpg"),
+      .load("https://a/2.jpg")
+    )
+  }
+
+  /**
+   The same cover twice is left alone.
+
+   Two tracks off one album share an artwork URL, and refetching would replace
+   the image with an identical one — a visible flicker on the lock screen at
+   every track change within an album, which is the common case.
+   */
+  func testTheSameCoverIsKeptRatherThanRefetched() {
+    XCTAssertEqual(
+      artworkAction(for: "https://a/1.jpg", currentlyLoaded: "https://a/1.jpg"),
+      .keep
+    )
+  }
+
+  func testTheFirstCoverIsLoadedWhenNothingIsShowing() {
+    XCTAssertEqual(artworkAction(for: "https://a/1.jpg", currentlyLoaded: nil), .load("https://a/1.jpg"))
+  }
+
+  /// Nothing showing and nothing to show is not a clear-and-redraw.
+  func testNoArtworkAndNothingLoadedStillClears() {
+    XCTAssertEqual(artworkAction(for: nil, currentlyLoaded: nil), .clear)
+  }
+
   func testCarriesTheMetadata() {
     let info = NowPlayingInfo.build(from: snapshot())
     XCTAssertEqual(info[MPMediaItemPropertyTitle] as? String, "Roygbiv")

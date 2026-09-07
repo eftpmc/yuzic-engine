@@ -99,6 +99,28 @@ public struct RemoteCommandHandlers {
   public init() {}
 }
 
+/**
+ What to do with the lock screen's cover when a new track arrives.
+
+ Pulled out as a decision because it is the part worth testing — the rest is
+ `MPNowPlayingInfoCenter`, which needs a real app — and because getting it
+ wrong is not visibly a bug. The failure mode is the *previous* track's cover
+ sitting under the new track's title, which reads as artwork that loaded fine.
+ */
+public enum ArtworkAction: Equatable {
+  /// Same image as the outgoing track. Leave it; refetching would flicker.
+  case keep
+  /// Fetch this. Whatever is showing stays up until it arrives.
+  case load(String)
+  /// This track has no cover. The old one has to go, or it becomes a lie.
+  case clear
+}
+
+public func artworkAction(for uri: String?, currentlyLoaded loaded: String?) -> ArtworkAction {
+  guard let uri, !uri.isEmpty else { return .clear }
+  return uri == loaded ? .keep : .load(uri)
+}
+
 public final class NowPlayingCenter {
 
   private let center = MPNowPlayingInfoCenter.default()
@@ -122,10 +144,31 @@ public final class NowPlayingCenter {
     // Stated, never inferred. This is the CarPlay bug.
     center.playbackState = snapshot.isPlaying ? .playing : .paused
 
-    if let artworkUri, artworkUri != artworkURL {
-      artworkURL = artworkUri
-      loadArtwork(artworkUri)
+    switch artworkAction(for: artworkUri, currentlyLoaded: artworkURL) {
+    case .keep:
+      break
+    case .load(let uri):
+      artworkURL = uri
+      loadArtwork(uri)
+    case .clear:
+      artworkURL = nil
+      setArtwork(nil)
     }
+  }
+
+  /// Put an image on the lock screen, or take one off. Main-thread only,
+  /// because `nowPlayingInfo` is read on it.
+  private func setArtwork(_ artwork: MPMediaItemArtwork?) {
+    let apply = {
+      var info = self.center.nowPlayingInfo ?? [:]
+      if let artwork {
+        info[MPMediaItemPropertyArtwork] = artwork
+      } else {
+        info.removeValue(forKey: MPMediaItemPropertyArtwork)
+      }
+      self.center.nowPlayingInfo = info
+    }
+    if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
   }
 
   public func clear() {
@@ -139,17 +182,31 @@ public final class NowPlayingCenter {
     // tested by `swift test` without an app, and cover art is the one part of
     // this that genuinely cannot come along.
     #if canImport(UIKit)
-    guard let url = URL(string: uri) else { return }
-    URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-      guard let self, let data,
-            self.artworkURL == uri,             // a later track already won
-            let image = UIImage(data: data) else { return }
-      let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-      DispatchQueue.main.async {
-        var info = self.center.nowPlayingInfo ?? [:]
-        info[MPMediaItemPropertyArtwork] = artwork
-        self.center.nowPlayingInfo = info
+    guard let url = URL(string: uri) else { setArtwork(nil); return }
+
+    // A short timeout because this is decorative. The default is 60 seconds,
+    // and a server that hangs would otherwise leave the outgoing track's cover
+    // on the lock screen for a minute of the new one.
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 10
+
+    URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+      guard let self else { return }
+      // A later track already won the race; whatever came back is not wanted,
+      // and clearing here would wipe the newer track's cover.
+      guard self.artworkURL == uri else { return }
+
+      guard let data, let image = UIImage(data: data) else {
+        // No art for this track — a 404, a timeout, or a body that is not an
+        // image. Clearing matters: the previous track's cover is still up, and
+        // leaving it means the lock screen shows one album while playing
+        // another. Wrong art is worse than none, because it looks correct.
+        self.setArtwork(nil)
+        return
       }
+
+      let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+      self.setArtwork(artwork)
     }.resume()
     #endif
   }
