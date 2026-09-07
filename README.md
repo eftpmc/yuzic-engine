@@ -1,201 +1,156 @@
 # yuzic-engine
 
-Audio playback engine for [yuzic](https://github.com/eftpmc/yuzic). React Native,
-written from scratch.
+An audio playback engine for React Native, built around an audio graph rather
+than a single player. Written for [yuzic](https://github.com/eftpmc/yuzic), a
+self-hosted music client, and usable on its own.
 
-## Why this exists
+Apache-2.0. iOS and Android.
 
-Not primarily a licensing exercise. Two reasons, in order:
+```ts
+import { YuzicEngine } from 'yuzic-engine';
 
-1. **Control.** yuzic already carries a ~389-line patch against its current
-   player — deleting an Android Cast integration it doesn't want, fixing an iOS
-   now-playing state bug that made CarPlay show "paused" on first play. That is
-   maintaining a fork without any of the benefits of owning one.
-2. **Features the existing React Native players don't expose.** Crossfade needs
-   two players overlapping with volume ramps; every RN track player presents a
-   single player with no seam to reach through. Same story for real DSP — an
-   equalizer that actually processes audio needs an audio graph, not a
-   play-this-URL API.
+await YuzicEngine.setup({ progressIntervalMs: 1000 });
+await YuzicEngine.setQueue(tracks, 0);
+await YuzicEngine.setCrossfade({ durationSec: 8, mode: 'gapless-aware' });
+await YuzicEngine.play();
 
-Licence independence is a consequence, not the goal: yuzic is GPL-3.0 and its
-current player went proprietary at v5, which is a real problem, but it isn't
-what this is for.
+const off = YuzicEngine.addListener(event => {
+  if (event.type === 'progress') draw(event.progress);
+});
+```
 
-## Hard rule: no v5
+## Why a graph
 
-`@rntp/player` v5 is proprietary and its licence carries a non-competition
-clause — it may not be used, in whole or in part, to build something that
-competes directly with react-native-track-player. An RN audio engine competes
-directly.
+Two tracks have to be audible at once for a crossfade, and an equalizer has to
+sit somewhere in the signal path. Neither is expressible against an API that
+plays one URL at a time — you can fade a single output down and back up, but
+the join is a hole rather than an overlap.
 
-- **Do not** read, copy, port, or consult `@rntp/player` v5 source while working
-  on this.
-- react-native-track-player **v4 and earlier is Apache-2.0**, and that grant is
-  perpetual for the code published under it. Referencing or lifting from v4 is
-  legally clean, with attribution and a NOTICE. We are choosing not to fork it
-  because it is old — but it stays available as a legitimate reference for
-  platform edge cases.
-- Anything lifted from v4 gets attributed in NOTICE, and the change stated.
+So the engine keeps **two voices**, each a player node feeding its own gain,
+summed into a mixer, through an EQ, to the output. A crossfade is the window
+where both are running and their gains are moving in opposite directions. A
+gapless join is the same machinery with a zero-length fade. Everything else —
+replay gain, speed, the equalizer — is a node in a graph that already exists.
 
-## What it has to do
+The cost is that the unglamorous work is yours: audio sessions, interruptions,
+route changes, decoding, caching, and the lock screen. Most of this repository
+is that work, and [`docs/architecture.md`](docs/architecture.md) explains the
+ten decisions it rests on.
 
-Taken from what yuzic actually calls today, not from a wishlist.
+## What it does
 
-**Queue** — set a whole queue; add, insert, remove, move items; skip to index /
-next; read the queue, the active item and its index.
+**Queue, natively.** Set, append, insert, remove, move, clear; skip to next,
+previous or an index; read it back. The queue lives in native code because
+backgrounded JavaScript is suspended and the lock screen, the notification and
+the car have to keep working anyway.
 
-**Transport** — play, pause, stop, seek, volume, playback speed, repeat mode
+**Transport.** Play, pause, stop, seek, volume, speed (0.25×–4×), repeat
 (off / one / all).
 
-**Progress** — position, duration and buffered, read both by subscription
-(~1Hz) and imperatively.
+**Crossfade.** Configurable duration, with two modes: `gapless-aware` hard-cuts
+where a track is marked as following the previous one, so a segued album is not
+faded through its own joins; `always` fades everything. A user-initiated skip
+always cuts, because a fade after a button press reads as lag.
 
-**Events** — track transition, playback state change, playback error.
+**DSP.** A ten-band equalizer, bypassed entirely when flat, and replay gain with
+album/track/auto modes and clipping protection.
 
-**Platform integration**
-- Background playback with lock-screen / notification controls and artwork.
-- `MPNowPlayingInfoCenter.playbackState` settable explicitly. The current
-  player's failure to do this is the CarPlay "paused on first play" bug.
-- CarPlay: a browsable tree and a configurable command set.
-- Android Auto equivalent.
-- Audio focus, interruptions, route changes, becoming-noisy.
+**Sources.** Local files, and HTTP streaming with auth in query parameters or
+headers. Remote audio is fetched through a byte source with an on-device LRU
+cache keyed by media id — not by URL, because Subsonic and Jellyfin hand out
+URLs carrying a token that rotates, and keying on those re-downloads the same
+audio every session.
 
-**Sources**
-- Local files (`file://`) for offline downloads.
-- HTTP streaming where the URL carries auth in query params or headers.
-- An on-device LRU cache, 1GB by default, cleared and measured on demand.
-  Built: sparse entries keyed by `MediaId`, surviving relaunch, evicted
-  least-recently-used. iOS only so far.
+**Platform integration.** Background playback, lock-screen and notification
+controls with artwork, CarPlay and Android Auto browse trees, audio focus,
+interruptions, route changes, becoming-noisy, and a sleep timer that fades
+rather than cuts.
 
-**Sleep timer** — stop after a duration, cancellable.
+**Events.** State changes, track changes with the time actually listened,
+progress, queue changes, and errors.
 
-## What it should do that today's players can't
+## Formats
 
-- **Crossfade** between tracks. Runs: two sources overlapping, the transition
-  begun by the engine's own tick and the track change landing at the fade's
-  midpoint. Same rate, on the simulator — mixed rates, a real device and
-  Bluetooth are open question 4.
-- **DSP**: a working equalizer, replay gain / normalisation.
-- Whatever the audio-graph architecture makes cheap once it exists.
+Core Audio and Media3 between them cover MP3, AAC/M4A, ALAC, FLAC and WAV. Two
+that they do not, and this engine decodes itself:
 
-## Decided
+| | iOS | Android |
+| --- | --- | --- |
+| Ogg Vorbis | libvorbis, vendored | Media3 |
+| Ogg Opus | *(on a branch)* | Media3 |
 
-Reasoning for each is in [docs/architecture.md](docs/architecture.md).
+iOS has no Vorbis decoder at all — an `.ogg` cannot be opened by Core Audio, so
+the failure is total rather than a quality loss. For a self-hosted library
+stored as Vorbis that is the difference between working and not, so libogg and
+libvorbis are vendored under `ios/Vendor` (BSD-3, see NOTICE) and
+`VorbisFileReader` decodes them through the same cache and ranged requests as
+everything else. The decoder is chosen by reading the codec out of the first
+Ogg page, not by file extension — a stream URL does not have one.
 
-- **Licence: Apache-2.0.** Permissive, patent grant, same as react-native-track-
-  player v4. yuzic consumes it under GPL-3 without friction, and it does not
-  impose on anyone else the kind of restriction this project exists to escape.
-- **A graph, not a queue player.** Crossfade and a real equalizer are not
-  expressible against a single-output player; that is the wall every existing
-  RN player hits.
-- **Remote audio is fetched to disk and played from there.** The graph plays
-  files, and yuzic already caches everything to disk, so streaming and caching
-  become one path instead of two.
-- **The queue lives natively.** Backgrounded JS gets suspended; the lock screen
-  and the car must keep working anyway.
-- **`MPNowPlayingInfoCenter.playbackState` is set explicitly.** Taken straight
-  from the bug that made CarPlay show "paused" while audio played.
+## Platform state
 
-## Still open
+Derived from the modules rather than remembered, because this section has been
+wrong before by asserting a parity that had stopped being true hours earlier.
 
-- ~~**Gapless detection**: encoder delay/padding metadata, or the host's word.~~
-  **Neither — Core Audio already does it.** `ExtAudioFile` applies the packet
-  table itself: a two-second AAC file reports 88200 playable frames for 88200
-  in, with priming 2112 and remainder 824 sitting alongside untouched, and the
-  first read is music rather than silence. Measured, after an implementation
-  that trimmed it a second time reported every lossy track ~3000 frames short
-  and skipped 2112 frames of real audio per track. The padding figures are
-  still read and exposed, and a test pins the platform behaviour so that if it
-  ever changes, this becomes work again.
-- **Android has never run**, and is now eleven methods behind iOS.
+| | iOS | Android |
+| --- | --- | --- |
+| Playback, queue, transport | yes | yes |
+| Crossfade | yes | yes |
+| Equalizer, replay gain | yes | yes |
+| Lock screen, car | yes | yes |
+| Disk cache | yes | **no** — `configureCache`, `clearCache`, `cacheStats` and `evict` are unimplemented |
 
-  It compiles — it did not before, and the three errors were the kind only a
-  compiler finds. The two modules did reach parity at twenty-four functions
-  each, and that claim then went stale the same day: queue editing, repeat,
-  speed and the disk cache were added to iOS only, and the comparison was not
-  re-run. Declared in `AudioEngine.ts` and **absent** from the Kotlin:
+A method a platform lacks rejects with its own name and that platform's —
+`setSpeed() is not implemented on android` — rather than arriving as
+`undefined` and failing as a type error somewhere unrelated.
 
-  | | |
-  | --- | --- |
-  | queue editing | `insertAt` `removeAt` `move` `clearQueue` `getQueue` |
-  | transport | `setSpeed` `setRepeatMode` |
-  | cache | `configureCache` `clearCache` `cacheStats` `evict` |
+## Using it
 
-  Absent, not inert: `YuzicEngine.ts` is a pass-through with no platform
-  branching, so each of these throws at the bridge on Android. A host must not
-  call them there.
+An Expo module. Add it to `plugins` in `app.json` so its config plugin can run:
+it declares background audio and the CarPlay scene, and without it the CarPlay
+screen never appears and nothing logs to say why.
 
-  The lesson is worth keeping with the list. Parity between two platforms is
-  only true at the moment it is measured, and this file asserted it from memory
-  for several hours after it stopped being so. Re-derive it from the modules
-  before relying on it.
+```json
+{ "expo": { "plugins": ["yuzic-engine"] } }
+```
 
-  Compiling is the whole of the evidence. There is no Kotlin test target and
-  nothing has been on a device or an emulator, so every behaviour below the
-  type checker is unverified — including three things that were wrong on
-  inspection and may have company: every player call was being made from Expo's
-  background dispatcher, which ExoPlayer rejects outright; the queue's active
-  index did not follow the player's; and replay gain had no channel to be
-  applied through.
+Two things the plugin cannot do for you:
 
-  Events are written now — `onProgress`, `onStateChange` and `onTrackChange`
-  were declared and emitted by nothing — but written is not run. Android is
-  also behind on the newest work: queue editing, repeat, speed and the disk
-  cache are iOS only, and its four cache calls are no-ops because Media3 keeps
-  a cache of its own that has not been joined up.
+1. **The `com.apple.developer.carplay-audio` entitlement is granted by Apple per
+   app**, on request. Until it is, none of the CarPlay support appears in a car.
+   The plugin deliberately does not fabricate the entitlement, because that
+   trades a clear message for a signing failure.
+2. **If your project commits its `ios/` directory**, the plugin's Info.plist
+   changes only land on a prebuild.
 
-## What still stands between this and replacing the player
+To try CarPlay without a car: Xcode's Simulator has **I/O → External Displays →
+CarPlay**, which needs the entitlement the same way a head unit does.
 
-Measured against every `TrackPlayer.*` call yuzic actually makes.
+## Building and testing
 
-**On iOS: nothing.** Queue editing, repeat, speed and the cache were the last
-of it, and gapless turned out to be the platform's job already. What remains is
-not new engine surface — it is the host swap itself, and the questions a
-simulator cannot answer: mixed sample rates through the mixer, route changes
-mid-crossfade, thermals with two hi-res decoders (open questions 4, 5 and 7).
+```sh
+npm install
+npm run typecheck    # both tsconfigs — see below
+npm test             # the TypeScript side
+swift test           # the iOS core: 219 tests, no Xcode project, no app
+```
 
-**On Android: all of it.** Nothing above has run, and it is behind besides —
-no speed, no repeat, no queue editing, and four cache calls that do nothing
-because Media3 keeps a cache of its own that has not been joined up.
-- ~~**Seek cost, measured.**~~ Answered, for both transports: seeking from 4.4s
-  to 151.4s with only 11.1s buffered, against a real Navidrome over the open
-  internet — **273ms** on a direct ranged stream, **333ms** on a transcoded one
-  that has to reconnect with `timeOffset`. A seek far outside the fetched region
-  costs about a round trip either way, not a rebuffer. See §2, §10 and open
-  question 3.
+`ios/Core` is a SwiftPM target as well as part of the pod, which is what lets
+the engine's logic be built and run on any Mac with no app around it. The
+bridge in `ios/YuzicEngineModule.swift` is podspec-only and is therefore
+compiled by an app build and nothing else — worth knowing before trusting a
+green `swift test` on a change to it.
 
-## Settled by building
+`npm run typecheck` runs `tsconfig.json` *and* `tsconfig.build.json`. The second
+is the one `prepare` uses when this package is installed from git, and it once
+diverged far enough that the package could not be installed at all while every
+local check passed.
 
-These were open questions in the first draft of this file. Each was answered by
-writing the thing and running it, not by deciding harder — the reasoning is in
-[docs/architecture.md](docs/architecture.md).
+`Tools/mutate.py` breaks one real behaviour at a time and checks that a test
+notices. It exists because a test suite can be green and vacuous — one of these
+was named for the crossfade and could not observe the crossfade curve.
 
-- **Bridge: Expo Modules.** The config-plugin ergonomics turned out to be the
-  whole argument; see `app.plugin.js`, which is doing more than expected.
-- **The cache: a ranged fetcher of our own.** `AVAssetResourceLoader` was the
-  obvious candidate and the spike killed it. `spikes/ios-reader/` has the
-  measurements, including the one that mattered: a 90% seek into a FLAC pulls
-  177% of the file, because libFLAC's seek is architecturally a scan.
-- **Hi-res: the host chooses, and the engine enforces.** `setSampleRateMode`
-  turns crossfade off when set to `match-source` and says so, because
-  overlapping sources have to share a hardware rate. Two settings that silently
-  contradict each other would have been the worse answer.
+## Contributing
 
-## CarPlay
-
-The engine draws the car's screen from a tree the host pushes down in advance,
-because the car asks while the app's JavaScript is asleep. `setBrowseTree` takes
-an ordinary nested tree; selection is resolved and played natively, and the host
-finds out through the usual track-change event.
-
-Two things the config plugin cannot do for you:
-
-1. **The `com.apple.developer.carplay-audio` entitlement is granted by Apple,
-   per app**, on request. Until it is, none of this appears in a car — and
-   nothing logs to say why. The plugin deliberately does not fabricate the
-   entitlement, because that trades a clear message for a signing failure.
-2. **yuzic commits its `ios/` directory**, so the plugin's Info.plist changes
-   only land on a prebuild.
-
-To try it without a car: Xcode's Simulator has **I/O → External Displays →
-CarPlay**, which needs the entitlement the same way a real head unit does.
+See [CONTRIBUTING.md](CONTRIBUTING.md), which covers the one rule about where
+code may come from.
