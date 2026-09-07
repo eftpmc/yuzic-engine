@@ -22,7 +22,7 @@ public final class TrackPlayback {
   public static let bufferFrames: AVAudioFrameCount = 22_050
   public static let targetBuffersAhead = 4
 
-  private let reader: AudioFileReader
+  private let reader: TrackReader
   private let voice: AudioGraph.Voice
   private let queue: DispatchQueue
   private let lock = NSLock()
@@ -35,7 +35,7 @@ public final class TrackPlayback {
   /// Fires once the last scheduled buffer has played out.
   public var onEndOfTrack: (() -> Void)?
 
-  public init(reader: AudioFileReader, voice: AudioGraph.Voice, label: String = "decode") {
+  public init(reader: TrackReader, voice: AudioGraph.Voice, label: String = "decode") {
     self.reader = reader
     self.voice = voice
     self.queue = DispatchQueue(label: "dev.yuzic.engine.\(label)", qos: .userInitiated)

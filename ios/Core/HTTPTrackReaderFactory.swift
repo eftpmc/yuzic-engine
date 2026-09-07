@@ -39,7 +39,7 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
     self.cache = cache
   }
 
-  public func makeReader(for track: Track) throws -> AudioFileReader {
+  public func makeReader(for track: Track) throws -> TrackReader {
     let source = try makeSource(for: track)
     let reader = AudioFileReader(source: source)
     try reader.open(hint: Self.typeHint(for: track.uri))

@@ -49,7 +49,7 @@ final class PlaybackEngineTests: XCTestCase {
     private(set) var opened: [MediaId] = []
     init(data: Data) { self.data = data }
 
-    func makeReader(for track: Track) throws -> AudioFileReader {
+    func makeReader(for track: Track) throws -> TrackReader {
       opened.append(track.id)
       let source = CachedByteSource(fetcher: MemoryFetcher(data), windowBytes: 32 * 1024)
       return AudioFileReader(source: source)

@@ -5,7 +5,7 @@ import AVFoundation
 /// from fixtures in a test without a network, and so the choice between the two
 /// transports lives in one place rather than inside the engine.
 public protocol TrackReaderFactory {
-  func makeReader(for track: Track) throws -> AudioFileReader
+  func makeReader(for track: Track) throws -> TrackReader
 }
 
 /**
@@ -46,7 +46,7 @@ public final class PlaybackEngine {
 
   private var activePlayback: TrackPlayback?
   private var incomingPlayback: TrackPlayback?
-  private var activeReader: AudioFileReader?
+  private var activeReader: TrackReader?
 
   private var ticker: Timer?
   private var transitioning = false

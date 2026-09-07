@@ -25,7 +25,7 @@ import AudioToolbox
  Not thread-safe: one reader per producer thread, which is the shape the design
  wants anyway.
  */
-public final class AudioFileReader {
+public final class AudioFileReader: TrackReader {
 
   public enum ReaderError: Error {
     case openFailed(OSStatus)
@@ -75,6 +75,10 @@ public final class AudioFileReader {
    parser sniffs, which costs extra reads at the head — and reads are network
    requests here, not memcpy.
    */
+  /// `TrackReader`'s spelling. A defaulted argument does not satisfy a
+  /// protocol requirement in Swift, so the no-hint case is written out.
+  public func open() throws { try open(hint: 0) }
+
   public func open(hint: AudioFileTypeID = 0) throws {
     let context = Unmanaged.passUnretained(self).toOpaque()
 
