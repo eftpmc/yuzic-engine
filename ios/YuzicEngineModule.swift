@@ -204,7 +204,11 @@ public final class YuzicEngineModule: Module {
     AsyncFunction("skipToPrevious") { try self.requireEngine().skipToPrevious() }
     AsyncFunction("skipToIndex") { (index: Int) in try self.requireEngine().skipTo(index: index) }
     AsyncFunction("setVolume") { (volume: Double) in
-      self.graph.map { $0.activeVoice.gain.outputVolume = Float(max(0, min(1, volume))) }
+      // Through the engine, not onto the gain node. Writing `outputVolume`
+      // here put user volume on the same node the crossfade ramps, so it was
+      // discarded by the next fade and, after a skip taken mid-fade, wrote to
+      // a voice nothing would touch again until the following track.
+      try self.requireEngine().volume = Float(volume)
     }
 
     AsyncFunction("setSpeed") { (speed: Double) in

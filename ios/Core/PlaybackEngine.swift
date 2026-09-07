@@ -46,6 +46,8 @@ public final class PlaybackEngine {
 
   private var activePlayback: TrackPlayback?
   private var incomingPlayback: TrackPlayback?
+  /// What the idle voice is carrying during a crossfade, so volume can reach it.
+  private var incomingTrack: Track?
   private var activeReader: TrackReader?
 
   private var ticker: Timer?
@@ -109,8 +111,49 @@ public final class PlaybackEngine {
    */
   public var replayGain: ReplayGainSettings = .off {
     didSet {
-      guard replayGain != oldValue, let track = queue.activeTrack else { return }
-      graph.setTrackGain(graph.activeVoice, to: ReplayGain.linearGain(for: track, settings: replayGain))
+      guard replayGain != oldValue else { return }
+      applyVolume()
+    }
+  }
+
+  /**
+   The user's volume, held here rather than written onto a gain node.
+
+   It has to live somewhere: `AudioGraph.setTrackGain` explains that a fade
+   ramps `gain.outputVolume` from 0 to 1 and anything else written there is
+   overwritten by the next ramp. Volume was being written exactly there, so it
+   survived only until the next fade, skip or track change — and a skip taken
+   during a crossfade left the voice stranded at whatever the abandoned ramp
+   had reached, with the next volume command writing to a node nothing would
+   read again until the following track.
+
+   Multiplied into the player alongside replay gain instead, which is the
+   separation that lets the two coexist.
+   */
+  public var volume: Float = 1 {
+    didSet {
+      volume = min(max(volume, 0), 1)
+      applyVolume()
+    }
+  }
+
+  /// `volume × replay gain` for a track, which is what the player wants.
+  private func playerGain(for track: Track?) -> Float {
+    guard let track else { return volume }
+    return volume * ReplayGain.linearGain(for: track, settings: replayGain)
+  }
+
+  /**
+   Push volume to both voices, each for its own track.
+
+   Both, because during a crossfade two of them are audible and leaving one
+   behind makes the change lurch halfway through the fade — the same reason
+   Android applies it to both.
+   */
+  private func applyVolume() {
+    graph.setTrackGain(graph.activeVoice, to: playerGain(for: queue.activeTrack))
+    if transitioning {
+      graph.setTrackGain(graph.idleVoice, to: playerGain(for: incomingTrack))
     }
   }
 
@@ -517,7 +560,7 @@ public final class PlaybackEngine {
     playback.onEndOfTrack = { [weak self, weak playback] in self?.handleTrackFinished(playback) }
     activePlayback = playback
 
-    graph.setTrackGain(graph.activeVoice, to: ReplayGain.linearGain(for: track, settings: replayGain))
+    graph.setTrackGain(graph.activeVoice, to: playerGain(for: track))
     graph.cut(graph.activeVoice, to: 1)
 
     // `.playing` is announced when audio actually starts, not here. `start()`
@@ -611,6 +654,29 @@ public final class PlaybackEngine {
   }
 
   /**
+   Which duration to believe when deciding where a track ends.
+
+   The reader derives its length from bytes, and for a transcoding endpoint
+   that length is an estimate the server was never obliged to get right — a
+   Subsonic or Jellyfin transcode can declare a byte count that maps to far
+   less audio than the song contains. Deciding the fade from it starts the
+   crossfade in the middle of the track.
+
+   The host's own metadata is the song's real length, so when the two disagree
+   by more than a rounding error, that is the one to trust. When they agree,
+   the reader's is preferred: it is the decoded truth, exact for a local file
+   and already corrected for encoder padding.
+
+   `nil` means the host does not know, which is not the same as zero.
+   */
+  public static func referenceDuration(readerSec: Double, declaredSec: Double?) -> Double {
+    guard let declaredSec, declaredSec > 0 else { return readerSec }
+    guard readerSec > 0 else { return declaredSec }
+    let disagreement = abs(readerSec - declaredSec) / declaredSec
+    return disagreement > 0.05 ? declaredSec : readerSec
+  }
+
+  /**
    Where playback is now, asked rather than waited for.
 
    The host gets this as an event on a timer, but an event stream is no use to
@@ -657,7 +723,13 @@ public final class PlaybackEngine {
 
     guard !transitioning else { return }
     let fade = queue.transitionDuration(userInitiated: false)
-    guard Self.shouldBeginTransition(positionSec: position, durationSec: duration, transitionSec: fade) else {
+    // Not `duration` — see `referenceDuration`. A byte-derived length from a
+    // transcoding server can be far short of the song, and deciding the fade
+    // from it crossfades out of the middle of a track.
+    let endsAt = Self.referenceDuration(
+      readerSec: duration, declaredSec: queue.activeTrack?.durationSec
+    )
+    guard Self.shouldBeginTransition(positionSec: position, durationSec: endsAt, transitionSec: fade) else {
       return
     }
     beginTransition(over: fade)
@@ -677,7 +749,8 @@ public final class PlaybackEngine {
       // Set before the fade begins, not at the crossover: a track arriving at
       // the wrong loudness and being corrected halfway through the fade is
       // audible in a way that the correction itself is supposed to prevent.
-      graph.setTrackGain(graph.idleVoice, to: ReplayGain.linearGain(for: next, settings: replayGain))
+      incomingTrack = next
+      graph.setTrackGain(graph.idleVoice, to: playerGain(for: next))
       try incoming.start(atFrame: 0)
 
       let outgoing = activePlayback
@@ -720,7 +793,13 @@ public final class PlaybackEngine {
     transitioning = false
     incomingPlayback?.stop()
     incomingPlayback = nil
+    incomingTrack = nil
     graph.cut(graph.idleVoice, to: 0)
+    // And the active voice back to full. It was part-way through fading *out*
+    // when the fade was abandoned, and leaving it there means the track that
+    // goes on playing is quieter than it should be — audible after a seek
+    // during a crossfade, and left behind by a skip for the whole next track.
+    graph.cut(graph.activeVoice, to: 1)
   }
 
   // MARK: - Bookkeeping

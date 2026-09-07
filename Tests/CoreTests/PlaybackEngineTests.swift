@@ -40,6 +40,109 @@ final class PlaybackEngineTests: XCTestCase {
     XCTAssertTrue(PlaybackEngine.shouldBeginTransition(positionSec: 0, durationSec: 5, transitionSec: 10))
   }
 
+  // MARK: - Which duration decides where a track ends
+
+  /**
+   A byte-derived duration that disagrees with the host loses.
+
+   Reported from a real library: a song crossfaded into the next at about
+   forty seconds instead of near its end. With a twelve-second fade that puts
+   the reader's idea of the track at roughly fifty seconds — a transcoding
+   endpoint declaring a byte length that maps to a fraction of the song. The
+   host knows the real length from the server's metadata, and had it all along.
+   */
+  func testTheHostsDurationWinsWhenTheReaderIsWildlyShort() {
+    // 52s of "file" against a 200s song: trust the song.
+    XCTAssertEqual(PlaybackEngine.referenceDuration(readerSec: 52, declaredSec: 200), 200)
+    // And the fade then starts where it should, not at forty seconds.
+    XCTAssertFalse(PlaybackEngine.shouldBeginTransition(positionSec: 40, durationSec: 200, transitionSec: 12))
+    XCTAssertTrue(PlaybackEngine.shouldBeginTransition(positionSec: 188, durationSec: 200, transitionSec: 12))
+  }
+
+  func testTheReaderWinsWhenTheTwoAgree() {
+    // Exact for a local file, and already corrected for encoder padding, so a
+    // small disagreement should not throw away the more precise number.
+    XCTAssertEqual(PlaybackEngine.referenceDuration(readerSec: 199.5, declaredSec: 200), 199.5)
+  }
+
+  func testAnUnknownHostDurationLeavesTheReaderInCharge() {
+    // `nil` is "the host does not know", which is not zero.
+    XCTAssertEqual(PlaybackEngine.referenceDuration(readerSec: 200, declaredSec: nil), 200)
+    XCTAssertEqual(PlaybackEngine.referenceDuration(readerSec: 200, declaredSec: 0), 200)
+    // And a live stream, which has no finish line either way, still cannot fade.
+    XCTAssertEqual(PlaybackEngine.referenceDuration(readerSec: 0, declaredSec: nil), 0)
+  }
+
+  func testAReaderThatKnowsNothingDefersToTheHost() {
+    XCTAssertEqual(PlaybackEngine.referenceDuration(readerSec: 0, declaredSec: 200), 200)
+  }
+
+  // MARK: - Volume, and the node it is allowed to touch
+
+  /**
+   Volume goes to the player, not to the gain node the crossfade ramps.
+
+   This is the whole bug. `setVolume` wrote `gain.outputVolume` directly —
+   the node `AudioGraph.setTrackGain` documents as belonging to fades, where
+   "anything else written there is overwritten by the next ramp". So volume
+   lasted until the next fade, skip or track change, and a skip taken during a
+   crossfade left the voice stranded at whatever the abandoned ramp had
+   reached, with the next volume command writing somewhere nothing would read
+   again until the following track. Reported from a car: skip went silent, and
+   the volume button then stopped the music entirely until the app restarted.
+   */
+  func testVolumeGoesToThePlayerNotTheFadeNode() throws {
+    let (engine, _, graph) = try makeEngine()
+    engine.setQueue([song("a")], startIndex: 0)
+    try engine.play()
+
+    engine.volume = 0.5
+
+    XCTAssertEqual(graph.activeVoice.player.volume, 0.5, accuracy: 0.0001)
+    XCTAssertEqual(graph.activeVoice.gain.outputVolume, 1,
+                   "the gain node belongs to the fade and must be left alone")
+  }
+
+  /// A skip used to discard volume, because the new track's gain was cut to 1.
+  func testVolumeSurvivesASkip() throws {
+    let (engine, _, graph) = try makeEngine()
+    engine.setQueue([song("a"), song("b")], startIndex: 0)
+    try engine.play()
+    engine.volume = 0.4
+
+    try engine.skipToNext()
+
+    XCTAssertEqual(graph.activeVoice.player.volume, 0.4, accuracy: 0.0001,
+                   "the next track should play at the volume the user chose")
+    XCTAssertEqual(graph.activeVoice.gain.outputVolume, 1, "and at full fade gain")
+  }
+
+  /// Volume and replay gain are two multiplications, and both must survive.
+  func testVolumeComposesWithReplayGain() throws {
+    let (engine, _, graph) = try makeEngine()
+    engine.setQueue([song("a")], startIndex: 0)
+    try engine.play()
+
+    engine.volume = 0.5
+    let atFullVolume = graph.activeVoice.player.volume
+    engine.volume = 1.0
+    let expectedGain = graph.activeVoice.player.volume
+
+    XCTAssertEqual(atFullVolume, expectedGain * 0.5, accuracy: 0.0001,
+                   "halving volume should halve whatever replay gain decided")
+  }
+
+  func testVolumeIsClamped() throws {
+    let (engine, _, graph) = try makeEngine()
+    engine.setQueue([song("a")], startIndex: 0)
+    try engine.play()
+
+    engine.volume = 5
+    XCTAssertEqual(graph.activeVoice.player.volume, 1, accuracy: 0.0001)
+    engine.volume = -2
+    XCTAssertEqual(graph.activeVoice.player.volume, 0, accuracy: 0.0001)
+  }
+
   // MARK: - Repeat and the user's own skip
 
   /**
