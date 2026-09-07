@@ -419,8 +419,9 @@ config plugin's Info.plist scene entry lands only on a prebuild.
 Not a design decision — a record. The serious defects here have kept arriving in
 the same shape, and it is worth naming because it is not the shape most review
 looks for. Nothing below threw. Nothing below failed a test suite. Six of the
-seven are code that ran, returned, and accomplished nothing; the seventh is the
-same idea one level up, where what accomplished nothing was the handover.
+eight are code that ran, returned, and accomplished nothing. The other two are
+the same idea one level up: one where what accomplished nothing was the
+handover, one where it was the API boundary.
 
 **A guard that guards nothing.** `remoteCommandsEnabled` re-registered the lock
 screen's targets only when the value changed. Correct in isolation; the previous
@@ -459,7 +460,22 @@ would ever run it — and it would have compiled, reviewed clean, and never once
 faded. Nothing was wrong with the code; the defect existed only in the copy, and
 only between two machines.
 
-The common thread is that all seven are invisible to "does it return, and is the
+**A feature complete on one side of an API that nothing on the other side
+feeds.** The engine implements replay gain properly — per-track gain, a preamp
+for untagged tracks, a clipping guard using `replayGainPeak`, a floor. It is
+tested and it is correct. No host populates `replayGainDb` or `replayGainPeak`,
+so every track takes the untagged branch and every track gets the same
+multiplier. The feature cannot be observed to work or to fail, because nothing
+exercises the part that varies.
+
+This one was found by trying to test it: the check for whether an incoming
+track's gain was applied correctly during a crossfade could not be constructed,
+because no two tracks could be made to differ. A green result there would have
+meant nothing at all. It is the same shape as a function with no callers, moved
+out to the boundary between two codebases — where it is harder to see, because
+each side is complete and only the join is empty.
+
+The common thread is that all eight are invisible to "does it return, and is the
 return value right". What catches them is asking what the code *did* — which
 call ran, which caller reached it, what the user then heard. `Tools/mutate.py`
 automates one slice of this: break a real behaviour, and see whether any test

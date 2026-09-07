@@ -43,8 +43,9 @@ wrong instrument.
 here is not a crash — it is succeeding at nothing. A guard that guards nothing,
 a function with no callers, a stub that records its argument and discards it, a
 curve inherited by a caller that wanted a different one, a command greyed out
-before it can be sent, a state announcing an event that has not happened. Every
-one of those passed a test suite.
+before it can be sent, a state announcing an event that has not happened, a
+whole feature that no caller on the other side of the API ever feeds. Every one
+of those passed a test suite.
 
 `Tools/mutate.py` exists for the last of these: it breaks one real behaviour at
 a time and reports whether any test notices. A test that survives its own
