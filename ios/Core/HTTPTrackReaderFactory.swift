@@ -46,7 +46,7 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
     // extension — `/rest/stream.view?id=…` is the same shape whatever the
     // file is — and a server may transcode on the way out, so the only honest
     // answer to "what is this" is the first four bytes.
-    if Self.isOgg(source) {
+    if Self.isOggVorbis(source) {
       let reader = VorbisFileReader(source: source)
       try reader.open()
       return reader
@@ -58,21 +58,34 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
   }
 
   /**
-   Whether this is an Ogg container.
+   Whether this is Ogg *Vorbis*, rather than merely Ogg.
 
-   `OggS` is the page capture pattern and it is at byte zero of every Ogg
-   stream. Vorbis is assumed beyond that: Opus and FLAC-in-Ogg exist, and
-   neither is supported yet, so they will fail in the reader with a header
-   error rather than being silently mistaken for Vorbis.
+   The container is not enough. Ogg carries Opus and FLAC too, and both begin
+   with the same `OggS` capture pattern — so matching the container alone
+   would hand an Opus file to a Vorbis decoder, which fails with a header
+   error instead of being transcoded as it is today. The codec name sits in
+   the first page's body, a few bytes in, so identifying it costs the same
+   single read.
 
-   A source that cannot be read yet returns false and the Core Audio path is
+   A source that cannot be read yet answers false and the Core Audio path is
    tried, which is what would have happened anyway.
    */
-  static func isOgg(_ source: ByteSource) -> Bool {
-    guard let magic = try? source.read(offset: 0, count: 4), magic.count == 4 else {
+  static func isOggVorbis(_ source: ByteSource) -> Bool {
+    guard let head = try? source.read(offset: 0, count: 64), head.count >= 12 else {
       return false
     }
-    return magic.elementsEqual([0x4F, 0x67, 0x67, 0x53])  // "OggS"
+    let bytes = [UInt8](head)
+    guard bytes.starts(with: [0x4F, 0x67, 0x67, 0x53]) else { return false }  // "OggS"
+
+    // The identification packet is `0x01` then "vorbis". Searched for rather
+    // than read at a fixed offset because the page header's length varies with
+    // its segment table.
+    let marker: [UInt8] = [0x76, 0x6F, 0x72, 0x62, 0x69, 0x73]  // "vorbis"
+    guard bytes.count >= marker.count else { return false }
+    for start in 0...(bytes.count - marker.count) where Array(bytes[start..<start + marker.count]) == marker {
+      return true
+    }
+    return false
   }
 
   func makeSource(for track: Track) throws -> ByteSource {

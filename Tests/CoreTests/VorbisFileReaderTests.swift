@@ -188,6 +188,37 @@ final class VorbisFileReaderTests: XCTestCase {
     XCTAssertGreaterThan(try XCTUnwrap(try reader.read(frames: 4096)).frameLength, 0)
   }
 
+  // MARK: - Picking the decoder
+
+  /**
+   The container is not enough to choose a decoder by.
+
+   Ogg carries Opus and FLAC as well as Vorbis, all behind the same `OggS`
+   capture pattern. Matching the container alone would route an Opus file to
+   this reader, which fails with a header error — where today it is
+   transcoded by the server and plays.
+   */
+  func testAnOggVorbisStreamIsRecognised() {
+    XCTAssertTrue(HTTPTrackReaderFactory.isOggVorbis(MemorySource(encodeTone(seconds: 0.2))))
+  }
+
+  func testAnOggStreamThatIsNotVorbisIsNotClaimed() {
+    // An Ogg page header followed by Opus's identification packet.
+    var opus = Data([0x4F, 0x67, 0x67, 0x53, 0x00, 0x02, 0, 0, 0, 0, 0, 0])
+    opus.append(contentsOf: Array("OpusHead".utf8))
+    opus.append(Data(repeating: 0, count: 64))
+    XCTAssertFalse(HTTPTrackReaderFactory.isOggVorbis(MemorySource(opus)))
+  }
+
+  func testSomethingThatIsNotOggIsNotClaimed() {
+    XCTAssertFalse(HTTPTrackReaderFactory.isOggVorbis(MemorySource(Data(repeating: 0x41, count: 512))))
+  }
+
+  /// Too short to judge: answer no and let the Core Audio path try.
+  func testATruncatedStreamIsNotClaimed() {
+    XCTAssertFalse(HTTPTrackReaderFactory.isOggVorbis(MemorySource(Data([0x4F, 0x67, 0x67]))))
+  }
+
   func testOpeningSomethingThatIsNotVorbisFails() throws {
     let reader = VorbisFileReader(source: MemorySource(Data(repeating: 0x41, count: 8192)))
     XCTAssertThrowsError(try reader.open())
