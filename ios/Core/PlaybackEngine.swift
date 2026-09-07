@@ -254,7 +254,7 @@ public final class PlaybackEngine {
         title: track.title,
         artist: track.artist,
         album: track.album,
-        durationSec: track.continuous ? 0 : Double(reader.totalFrames) / sampleRate,
+        durationSec: trustedDuration,
         positionSec: position,
         isPlaying: state == .playing,
         rate: 1.0,
@@ -766,6 +766,23 @@ public final class PlaybackEngine {
 
    `nil` means the host does not know, which is not the same as zero.
    */
+  /**
+   How long the current track is, for anything that reports a length.
+
+   Exists so there is exactly one answer. The seek bar and the lock screen were
+   computing this separately, and fixing only the first left the second showing
+   a byte-derived length — the same wrong number on the surface where it is
+   least visible and most irritating. Anything that needs a duration asks here.
+   */
+  private var trustedDuration: Double {
+    guard let reader = activeReader, reader.sampleRate > 0 else { return 0 }
+    guard let track = queue.activeTrack, !track.continuous else { return 0 }
+    return Self.referenceDuration(
+      readerSec: Double(reader.totalFrames) / reader.sampleRate,
+      declaredSec: track.durationSec
+    )
+  }
+
   public static func referenceDuration(readerSec: Double, declaredSec: Double?) -> Double {
     guard let declaredSec, declaredSec > 0 else { return readerSec }
     guard readerSec > 0 else { return declaredSec }
@@ -792,14 +809,8 @@ public final class PlaybackEngine {
       // A live stream has no finish line, and reporting the bytes fetched so
       // far as a duration draws a progress bar that lies. Neither does a
       // byte-derived length that disagrees with the host — see
-      // `referenceDuration`. The seek bar and the crossfade have to be reading
-      // the same clock, or the track ends somewhere the bar never reaches.
-      queue.activeTrack?.continuous == true
-        ? 0
-        : Self.referenceDuration(
-            readerSec: Double(reader.totalFrames) / reader.sampleRate,
-            declaredSec: queue.activeTrack?.durationSec
-          ),
+      // `trustedDuration`, which is the one answer every surface uses.
+      trustedDuration,
       // Absolute, not relative: a buffering bar is drawn against the same
       // timeline as the position, so a figure measured from the playhead would
       // sit at the wrong end of it.
