@@ -114,22 +114,22 @@ final class PlaybackEngineTests: XCTestCase {
   }
 
   /**
-   A skip neither blocks the main thread nor silences what is playing.
+   A skip does not block the main thread, and cuts the old track at once.
 
-   Both halves of the reported fault, asserted together. `open()` on a remote
-   track is a network round trip; the old code ran it on the main thread *and*
-   silenced and stopped the outgoing track before starting it. So a car skip
-   froze the interface and produced dead air for the length of the fetch —
-   and the same skip on a downloaded playlist was instant, which is what
-   identified it.
+   `open()` on a remote track is a network round trip, and it used to run
+   inline on the main thread — so a car skip froze the interface for the length
+   of the fetch, and the lock screen could not show the new track until it
+   finished. Reported as thirteen seconds before the car display changed.
 
    The factory here blocks inside `makeReader` the way a slow network would.
-   While it is blocked the test asserts, on the main thread, that the outgoing
-   voice is still audible. That the assertions run at all is the other half:
-   if the open were still inline, this thread would be stuck inside
-   `skipToNext` and could not observe anything.
+   That the assertions run at all while it is blocked is the point: if the open
+   were still inline, this thread would be stuck inside `skipToNext`.
+
+   The outgoing track is cut on the press rather than left playing until the
+   replacement arrives. Keeping it audible avoided dead air but made the button
+   look ignored, which reads worse than a short gap.
    */
-  func testASkipNeitherBlocksTheMainThreadNorGoesSilent() throws {
+  func testASkipCutsAtOnceWithoutBlockingTheMainThread() throws {
     let (engine, factory, graph) = try makeEngine()
     engine.setQueue([song("a"), song("b")], startIndex: 0)
     try engine.play()
@@ -147,14 +147,14 @@ final class PlaybackEngineTests: XCTestCase {
     // Main thread is free: we reached here while the fetch is outstanding.
     XCTAssertEqual(opening.wait(timeout: .now() + 3), .success,
                    "the open should have started on another thread")
-    XCTAssertEqual(graph.activeVoice.gain.outputVolume, 1,
-                   "the outgoing track must still be audible during the fetch")
+    XCTAssertEqual(graph.activeVoice.gain.outputVolume, 0,
+                   "the old track should be cut on the press, not left playing")
     XCTAssertEqual(engine.queue.activeIndex, 1,
                    "and the queue should already show what was asked for")
 
     release.signal()
-    settle { factory.opened == ["a", "b"] }
-    XCTAssertEqual(factory.opened, ["a", "b"])
+    settle { graph.activeVoice.gain.outputVolume == 1 }
+    XCTAssertEqual(graph.activeVoice.gain.outputVolume, 1, "the new track becomes audible")
   }
 
   // MARK: - Volume, and the node it is allowed to touch
@@ -191,7 +191,9 @@ final class PlaybackEngineTests: XCTestCase {
     engine.volume = 0.4
 
     try engine.skipToNext()
-    settle { factory.opened == ["a", "b"] }
+    // Wait for the handover itself, not for the reader being *made* — that is
+    // recorded on the open queue, before `beginTrack` has run back on main.
+    settle { graph.activeVoice.gain.outputVolume == 1 }
 
     XCTAssertEqual(graph.activeVoice.player.volume, 0.4, accuracy: 0.0001,
                    "the next track should play at the volume the user chose")

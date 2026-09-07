@@ -68,6 +68,7 @@ public final class PlaybackEngine {
    carries the token it started with and is dropped if it no longer matches.
    */
   private var openToken: Int = 0
+
   private var activeReader: TrackReader?
 
   private var ticker: Timer?
@@ -603,35 +604,35 @@ public final class PlaybackEngine {
     // moment it is asked for; making them wait on a fetch is what makes a skip
     // feel broken even when it eventually works.
     queue.set(queue.tracks, startIndex: index)
-    let stateBeforeSkip = state
     state = .buffering
     emit(.trackChanged(index: index, id: track.id, previousListenedSec: listened))
     publishNowPlaying()
 
-    // Opened off the main thread, and *before* the outgoing track is touched.
-    // Two separate faults were here: the fetch ran on the main thread, and the
-    // outgoing track was silenced and stopped before it started. The first
-    // froze the interface for the length of the fetch; the second meant the
-    // listener got dead air for the same stretch — reported from a car, and
-    // absent on a downloaded playlist where opening a local file is instant.
+    // The outgoing track stops now. Keeping it audible until the replacement
+    // was ready avoided dead air, but it also meant pressing skip and hearing
+    // the same song for several more seconds — the button looking ignored,
+    // which reads worse than a short gap. Every other player cuts on the
+    // press and buffers into the silence.
     //
-    // Audio renders on its own thread, so the outgoing track goes on playing
-    // until the replacement is ready. A failure to open now leaves it playing
-    // rather than stopping it and cutting its gain to zero, which is a better
-    // answer to a skip that cannot be served than silence.
+    // A skip is a cut, not a fade — `transitionDuration` says so, and here it
+    // is honoured by not starting one at all.
+    graph.cut(graph.activeVoice, to: 0)
+    activePlayback?.stop()
+
+    // The fetch itself stays off the main thread. It runs there once and the
+    // interface froze for its whole length, on every skip and at the start of
+    // every crossfade.
     openReader(for: track) { [weak self] result in
       guard let self else { return }
       switch result {
       case .failure(let error):
-        // Back to whatever was interrupted — the outgoing track is still
-        // playing, since nothing was torn down.
-        self.state = stateBeforeSkip
+        // The outgoing track has already been cut, so there is nothing to fall
+        // back to: say so rather than sitting in `.buffering` forever, which
+        // is a spinner that never resolves.
+        self.state = .paused
+        self.publishNowPlaying()
         self.emit(.failed("Could not open \(track.title): \(error)"))
       case .success(let reader):
-        // A skip is a cut, not a fade — `transitionDuration` says so, and here
-        // it is honoured by not starting one at all.
-        self.graph.cut(self.graph.activeVoice, to: 0)
-        self.activePlayback?.stop()
         do {
           try self.beginTrack(at: index, fromFrame: 0, prepared: reader, announced: true)
         } catch {
