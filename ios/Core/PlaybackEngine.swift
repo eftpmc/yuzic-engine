@@ -482,8 +482,10 @@ public final class PlaybackEngine {
       let outgoing = activePlayback
       let listened = listenedSeconds()
 
-      graph.fade(graph.idleVoice, to: 1, over: duration)
-      graph.fade(graph.activeVoice, to: 0, over: duration) { [weak self] in
+      // Equal power on both halves: two tracks are audible together here,
+      // and linear ramps would sum to a hole in the middle of the crossover.
+      graph.fade(graph.idleVoice, to: 1, over: duration, curve: .equalPower)
+      graph.fade(graph.activeVoice, to: 0, over: duration, curve: .equalPower) { [weak self] in
         outgoing?.stop()
         self?.incomingPlayback = nil
       }

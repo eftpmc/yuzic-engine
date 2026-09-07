@@ -97,7 +97,11 @@ public final class YuzicEngineModule: Module {
           // Fade rather than cut: music stopping mid-bar is what wakes people,
           // which is the opposite of the point.
           guard let self, let graph = self.graph else { return }
-          graph.fade(graph.activeVoice, to: 0, over: fade) { self.engine?.pause() }
+          // Linear, not equal power. Nothing sums with this — it is one track
+          // going to silence — and equal power would still be at 0.707 halfway
+          // through, so the fade would hold almost full volume and then
+          // collapse. That is the opposite of a fade to sleep.
+          graph.fade(graph.activeVoice, to: 0, over: fade, curve: .linear) { self.engine?.pause() }
         }
       }
     }

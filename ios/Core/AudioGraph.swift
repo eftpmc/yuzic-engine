@@ -268,37 +268,61 @@ public final class AudioGraph {
    custom `AVAudioSourceNode` rather than a faster timer.
    */
   /**
+   The shape a fade follows. Chosen per call, because the right answer differs.
+
+   There is deliberately no default. A fade between two sources and a fade of
+   one source to silence want opposite curves, and making either the default
+   makes the other caller quietly wrong.
+   */
+  public enum FadeCurve {
+    /// Two uncorrelated sources overlapping. `rising² + falling² == 1` at every
+    /// point, so the pair sums to constant power and the crossover does not
+    /// dip. Linear ramps here sum to about 0.5 amplitude in the middle, which
+    /// is audibly a hole.
+    case equalPower
+
+    /// One source going somewhere on its own. Nothing sums with it, so
+    /// constant power is meaningless — and equal power is actively wrong here:
+    /// its fade-out is still at 0.707 halfway through, holding almost full
+    /// volume and then collapsing. For the sleep timer that is "still loud,
+    /// still loud, gone" rather than a fade to sleep.
+    case linear
+  }
+
+  /**
    The gain a fade should be at, a fraction `position` of the way through.
 
-   Equal power, not linear: two linear ramps crossing at their midpoint sum to
-   about 0.5 of full amplitude and the crossover is audibly a dip. Taking the
-   square root of the linear position keeps `rising² + falling² == 1` at every
-   point, which is what makes a crossfade sound like one sound becoming another
-   rather than one dipping and another rising.
-
-   Pure, and separated out because the curve is the part worth testing and the
-   rest is a timer. It is also the part that was wrong: the falling branch read
-   `1 - sqrt(1 - (1 - position))`, whose inner `1 - (1 - position)` collapses to
-   `position`, making it `1 - sqrt(position)` — and once interpolated between
-   start and target that inverted the fade-out, so the outgoing track rose from
-   silence and was cut off at full volume instead of fading away.
+   Pure, and separated out because the curve is the part worth testing while
+   the rest is a timer. It is also the part that was wrong once: the falling
+   branch read `1 - sqrt(1 - (1 - position))`, whose inner `1 - (1 - position)`
+   collapses to `position`, making it `1 - sqrt(position)` — and once
+   interpolated between start and target that inverted the fade-out, so the
+   outgoing track rose from silence and was cut off at full volume instead of
+   fading away.
    */
-  public static func fadeVolume(from start: Float, to target: Float, position: Float) -> Float {
+  public static func fadeVolume(
+    from start: Float, to target: Float, position: Float, curve: FadeCurve
+  ) -> Float {
     let p = max(0, min(1, position))
-    return target > start
-      ? start + (target - start) * sqrt(p)
-      : target + (start - target) * sqrt(1 - p)
+    switch curve {
+    case .equalPower:
+      return target > start
+        ? start + (target - start) * sqrt(p)
+        : target + (start - target) * sqrt(1 - p)
+    case .linear:
+      return start + (target - start) * p
+    }
   }
 
   public func fade(_ voice: Voice, to target: Float, over duration: TimeInterval,
-            completion: (() -> Void)? = nil) {
+            curve: FadeCurve, completion: (() -> Void)? = nil) {
     // A fade can be started from the decode queue — end-of-track is discovered
     // there — and `RunLoop` is not thread-safe. Scheduling a timer on the main
     // run loop from another thread is the kind of race that works in testing
     // and fails once, in a car.
     guard Thread.isMainThread else {
       DispatchQueue.main.async { [weak self] in
-        self?.fade(voice, to: target, over: duration, completion: completion)
+        self?.fade(voice, to: target, over: duration, curve: curve, completion: completion)
       }
       return
     }
@@ -318,7 +342,8 @@ public final class AudioGraph {
     let timer = Timer(timeInterval: interval, repeats: true) { [weak self] timer in
       let elapsed = CACurrentMediaTime() - startedAt
       let position = Float(min(1.0, elapsed / duration))
-      voice.gain.outputVolume = AudioGraph.fadeVolume(from: start, to: target, position: position)
+      voice.gain.outputVolume = AudioGraph.fadeVolume(
+        from: start, to: target, position: position, curve: curve)
 
       if position >= 1 {
         voice.gain.outputVolume = target

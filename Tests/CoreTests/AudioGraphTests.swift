@@ -87,6 +87,39 @@ final class AudioGraphTests: XCTestCase {
     )
   }
 
+  /**
+   The sleep timer's curve, which is not the crossfade's.
+
+   Equal power exists so two overlapping sources sum without a hole. A fade to
+   silence has nothing to sum with, and equal power there is still at 0.707
+   halfway — almost full volume, then a collapse. Linear reaches halfway at
+   halfway, which is what a fade to sleep should do.
+
+   Found by the Android session while about to make the opposite change on its
+   own platform, and it applies here: the sleep timer shares this ramp, so the
+   equal-power fix for crossfade had silently changed the bedtime fade too.
+   */
+  func testALinearFadeReachesHalfwayAtHalfway() {
+    XCTAssertEqual(
+      AudioGraph.fadeVolume(from: 1, to: 0, position: 0.5, curve: .linear),
+      0.5, accuracy: 0.001
+    )
+  }
+
+  /// The two curves differ where it matters, which is the whole reason the
+  /// caller has to choose: 0.5 against 0.707 at the midpoint.
+  func testTheTwoCurvesDisagreeAtTheMidpoint() {
+    let linear = AudioGraph.fadeVolume(from: 1, to: 0, position: 0.5, curve: .linear)
+    let equalPower = AudioGraph.fadeVolume(from: 1, to: 0, position: 0.5, curve: .equalPower)
+    XCTAssertLessThan(linear, equalPower)
+    XCTAssertEqual(equalPower, 0.707, accuracy: 0.01)
+  }
+
+  func testALinearFadeStillEndsWhereItShould() {
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 0, curve: .linear), 1, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 1, curve: .linear), 0, accuracy: 0.001)
+  }
+
   func testAudioActuallyReachesTheOutput() throws {
     let graph = AudioGraph()
     try graph.startOffline()
@@ -197,17 +230,17 @@ final class AudioGraphTests: XCTestCase {
    a real build before any test caught it.
    */
   func testAFadeOutFallsAndAFadeInRises() {
-    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 0), 1, accuracy: 0.001)
-    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 1), 0, accuracy: 0.001)
-    XCTAssertEqual(AudioGraph.fadeVolume(from: 0, to: 1, position: 0), 0, accuracy: 0.001)
-    XCTAssertEqual(AudioGraph.fadeVolume(from: 0, to: 1, position: 1), 1, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 0, curve: .equalPower), 1, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 1, curve: .equalPower), 0, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 0, to: 1, position: 0, curve: .equalPower), 0, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 0, to: 1, position: 1, curve: .equalPower), 1, accuracy: 0.001)
   }
 
   /// Monotonic, which is the property the inverted curve broke most audibly.
   func testAFadeOutNeverGetsLouder() {
-    var previous = AudioGraph.fadeVolume(from: 1, to: 0, position: 0)
+    var previous = AudioGraph.fadeVolume(from: 1, to: 0, position: 0, curve: .equalPower)
     for step in 1...50 {
-      let volume = AudioGraph.fadeVolume(from: 1, to: 0, position: Float(step) / 50)
+      let volume = AudioGraph.fadeVolume(from: 1, to: 0, position: Float(step) / 50, curve: .equalPower)
       XCTAssertLessThanOrEqual(volume, previous, "the fade-out rose at step \(step)")
       previous = volume
     }
@@ -223,8 +256,8 @@ final class AudioGraphTests: XCTestCase {
   func testTheTwoHalvesOfACrossfadeSumToConstantPower() {
     for step in 0...20 {
       let position = Float(step) / 20
-      let rising = AudioGraph.fadeVolume(from: 0, to: 1, position: position)
-      let falling = AudioGraph.fadeVolume(from: 1, to: 0, position: position)
+      let rising = AudioGraph.fadeVolume(from: 0, to: 1, position: position, curve: .equalPower)
+      let falling = AudioGraph.fadeVolume(from: 1, to: 0, position: position, curve: .equalPower)
       XCTAssertEqual(rising * rising + falling * falling, 1.0, accuracy: 0.001,
                      "power was not constant at \(position)")
     }
@@ -232,7 +265,7 @@ final class AudioGraphTests: XCTestCase {
 
   /// A partial fade — the sleep timer fades to silence from wherever it is.
   func testAPartialFadeStaysWithinItsEndpoints() {
-    let volume = AudioGraph.fadeVolume(from: 0.5, to: 0, position: 0.5)
+    let volume = AudioGraph.fadeVolume(from: 0.5, to: 0, position: 0.5, curve: .equalPower)
     XCTAssertLessThan(volume, 0.5)
     XCTAssertGreaterThan(volume, 0)
   }
@@ -240,8 +273,8 @@ final class AudioGraphTests: XCTestCase {
   /// Positions outside 0...1 are clamped rather than producing a NaN from
   /// `sqrt` of a negative.
   func testPositionsOutsideTheFadeAreClamped() {
-    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 1.5), 0, accuracy: 0.001)
-    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: -0.5), 1, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: 1.5, curve: .equalPower), 0, accuracy: 0.001)
+    XCTAssertEqual(AudioGraph.fadeVolume(from: 1, to: 0, position: -0.5, curve: .equalPower), 1, accuracy: 0.001)
   }
 
   func testCrossfadeDoesNotDipInTheMiddle() throws {
