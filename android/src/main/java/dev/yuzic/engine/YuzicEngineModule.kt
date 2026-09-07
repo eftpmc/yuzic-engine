@@ -87,6 +87,14 @@ class YuzicEngineModule : Module() {
       tracks.forEach { TrackHeaders.register(it.uri, it.headers) }
       cancelTransition()
       loadActiveTrack()
+      // Unconditionally, because the interesting case is the empty one.
+      // `loadActiveTrack` returns early when there is no active track, so
+      // `setQueue(emptyList())` takes the queue from n tracks to none while
+      // calling no player method at all — and "next" would go on being
+      // advertised for a track that is no longer there. The non-empty case
+      // does not need this (the media item changes and the player says so),
+      // but over-calling is free and the exemption is the part that was wrong.
+      commandsMayHaveChanged()
       sendEvent("onQueueChange", emptyMap<String, Any?>())
     }
 
@@ -137,7 +145,7 @@ class YuzicEngineModule : Module() {
         if (from != destination) {
           queue.move(from, destination)
           commandsMayHaveChanged()
-        sendEvent("onQueueChange", emptyMap<String, Any?>())
+          sendEvent("onQueueChange", emptyMap<String, Any?>())
         }
       }
     }
@@ -752,13 +760,6 @@ class YuzicEngineModule : Module() {
   }
 
   /**
-   * Push `user volume × replay gain` to both voices, each for its own track.
-   *
-   * Both, because during a crossfade two of them are audible and leaving one
-   * behind makes the change lurch halfway through the fade. Each for its own
-   * track, because the two rarely share a gain. Main thread only.
-   */
-  /**
    * Tell the session the command set may have moved.
    *
    * Called after any queue change that does not touch the player, because those
@@ -770,6 +771,13 @@ class YuzicEngineModule : Module() {
     PlaybackService.onCommandsMayHaveChanged?.invoke()
   }
 
+  /**
+   * Push `user volume × replay gain` to both voices, each for its own track.
+   *
+   * Both, because during a crossfade two of them are audible and leaving one
+   * behind makes the change lurch halfway through the fade. Each for its own
+   * track, because the two rarely share a gain. Main thread only.
+   */
   private fun applyVolume() {
     val graph = PlaybackService.graph ?: return
     applyVolumeTo(graph.activeVoice, queue.activeTrack)
