@@ -22,6 +22,11 @@ public final class TrackPlayback {
   public static let bufferFrames: AVAudioFrameCount = 22_050
   public static let targetBuffersAhead = 4
 
+  /// How many times a failing read is retried before the track is given up on.
+  public static let readRetries = 5
+  /// Base delay between retries; multiplied by the attempt number.
+  public static let readRetryDelaySec: TimeInterval = 0.25
+
   private let reader: TrackReader
   private let voice: AudioGraph.Voice
   private let queue: DispatchQueue
@@ -49,6 +54,19 @@ public final class TrackPlayback {
   public var onFirstBufferScheduled: (() -> Void)?
 
   private var scheduledAny = false
+  /// Consecutive failed reads, reset by any successful one.
+  private var consecutiveFailures = 0
+
+  /**
+   Fires when reads have failed enough times to give up on the track.
+
+   Distinct from `onEndOfTrack`, and the distinction is the point: a read that
+   *throws* is a failure, and a read that returns nothing is the end of the
+   file. `AudioFileReader.read` already says which is which — it returns nil at
+   the end and throws on error — and collapsing the two made a dropped
+   connection indistinguishable from a track finishing normally.
+   */
+  public var onReadFailed: ((Error) -> Void)?
 
   public init(reader: TrackReader, voice: AudioGraph.Voice, label: String = "decode") {
     self.reader = reader
@@ -161,12 +179,42 @@ public final class TrackPlayback {
         let buffer: AVAudioPCMBuffer?
         do {
           buffer = try self.reader.read(frames: Self.bufferFrames)
+          self.lock.lock(); self.consecutiveFailures = 0; self.lock.unlock()
         } catch {
-          // A read that fails mid-track ends what we can play. Whether that is
-          // worth telling anyone about is a decision for the layer above.
-          buffer = nil
+          // A read that throws is a *failure*, not an end. This used to set
+          // `reachedEnd` and the track reported a normal completion, so a
+          // network hiccup was indistinguishable from the file running out —
+          // and the engine advanced to the next track. Reported as songs
+          // "skipping" part-way through, at a different point every time,
+          // over the network only and never on downloaded files. Nothing threw
+          // where anyone could see it: the failure was reported as success.
+          self.lock.lock()
+          self.consecutiveFailures += 1
+          let attempt = self.consecutiveFailures
+          let givenUp = self.stopped
+          self.lock.unlock()
+          if givenUp { return }
+
+          if attempt <= Self.readRetries {
+            // Re-dispatched rather than slept. Sleeping holds the decode
+            // queue, and `stopAndWait` does `queue.sync {}` from the main
+            // thread — so a backoff would block the interface for its whole
+            // length, which is the fault this engine has just finished
+            // removing from two other paths.
+            self.queue.asyncAfter(
+              deadline: .now() + Self.readRetryDelaySec * Double(attempt)
+            ) { [weak self] in
+              self?.fill()
+            }
+            return
+          }
+
+          self.lock.lock(); self.stopped = true; self.lock.unlock()
+          self.onReadFailed?(error)
+          return
         }
 
+        // Nothing to read *without* an error is the genuine end of the file.
         guard let buffer, buffer.frameLength > 0 else {
           self.lock.lock(); self.reachedEnd = true; self.lock.unlock()
           self.notifyEndIfDrained()

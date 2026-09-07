@@ -386,7 +386,7 @@ public final class PlaybackEngine {
       graph.reconnect(graph.activeVoice, toSourceRate: reader.sampleRate)
 
       let fresh = TrackPlayback(reader: reader, voice: graph.activeVoice)
-      fresh.onEndOfTrack = { [weak self, weak fresh] in self?.handleTrackFinished(fresh) }
+      wire(fresh)
       fresh.onFirstBufferScheduled = { [weak self, weak fresh] in
         DispatchQueue.main.async {
           guard let self, self.activePlayback === fresh, self.state == .buffering else { return }
@@ -480,7 +480,7 @@ public final class PlaybackEngine {
     // old producer is still inside it.
     activePlayback?.stopAndWait()
     let playback = TrackPlayback(reader: reader, voice: graph.activeVoice)
-    playback.onEndOfTrack = { [weak self, weak playback] in self?.handleTrackFinished(playback) }
+    wire(playback)
     activePlayback = playback
     try playback.start(atFrame: frame)
     state = .playing
@@ -534,6 +534,31 @@ public final class PlaybackEngine {
 
   public func skipTo(index: Int) throws {
     try move(to: index, userInitiated: true)
+  }
+
+  /**
+   Wire the callbacks every playback needs.
+
+   Here rather than at each of the three sites that make one, because the
+   failure handler is the kind of thing a fourth site would omit without
+   noticing — and omitting it is exactly the bug: a lost stream reported as a
+   finished track.
+   */
+  private func wire(_ playback: TrackPlayback) {
+    playback.onEndOfTrack = { [weak self, weak playback] in self?.handleTrackFinished(playback) }
+    // A track that could not be read has *not* finished, and must not advance
+    // the queue. `AudioFileReader.read` returns nil at the end and throws on
+    // failure; treating both as the end is what made a dropped connection look
+    // like the song skipping part-way through.
+    playback.onReadFailed = { [weak self, weak playback] error in
+      DispatchQueue.main.async {
+        guard let self, self.activePlayback === playback else { return }
+        let title = self.queue.activeTrack?.title ?? "this track"
+        self.state = .paused
+        self.publishNowPlaying()
+        self.emit(.failed("Lost the stream for \(title): \(error)"))
+      }
+    }
   }
 
   // MARK: - Moving between tracks
@@ -649,7 +674,7 @@ public final class PlaybackEngine {
 
     activeReader = reader
     let playback = TrackPlayback(reader: reader, voice: graph.activeVoice)
-    playback.onEndOfTrack = { [weak self, weak playback] in self?.handleTrackFinished(playback) }
+    wire(playback)
     activePlayback = playback
 
     graph.setTrackGain(graph.activeVoice, to: playerGain(for: track))
