@@ -99,7 +99,16 @@ wrong before by asserting a parity that had stopped being true hours earlier.
 | Crossfade | yes | yes |
 | Equalizer, replay gain | yes | yes |
 | Lock screen, car | yes | yes |
-| Disk cache | yes | **no** — `configureCache`, `clearCache`, `cacheStats` and `evict` are unimplemented |
+| Disk cache | yes | yes |
+| Cache management | yes | all but `configureCache` |
+
+Android has always cached — `SimpleCache` sits in the data source chain, keyed
+by the host's `MediaId` so a rotating Subsonic or Jellyfin token does not
+re-download the same album. It was the *management* API that was missing, and
+only `configureCache` still is: Media3's evictor takes its limit as a
+constructor argument, so changing it needs either a second `SimpleCache` over
+one directory (documented as corrupting the index) or releasing the live one
+mid-track.
 
 A method a platform lacks rejects with its own name and that platform's —
 `setSpeed() is not implemented on android` — rather than arriving as

@@ -5,6 +5,7 @@ import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.util.UnstableApi
+import androidx.annotation.WorkerThread
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
@@ -190,6 +191,49 @@ class AudioGraph(private val context: Context, private val httpClient: OkHttpCli
     )
     cache = created
     return created
+  }
+
+  // MARK: - Cache
+
+  /**
+   * What the cache currently holds.
+   *
+   * Reads the field rather than `requireCache()`: with no cache built yet
+   * nothing has been cached, and zeros are the true answer. Creating one to
+   * report on it would be building the thing in order to measure it.
+   */
+  fun cacheStats(): Stats {
+    val existing = cache ?: return Stats(usedBytes = 0, maxBytes = cacheMaxBytes, entryCount = 0)
+    return Stats(
+      usedBytes = existing.cacheSpace,
+      maxBytes = cacheMaxBytes,
+      entryCount = existing.keys.size,
+    )
+  }
+
+  data class Stats(val usedBytes: Long, val maxBytes: Long, val entryCount: Int)
+
+  /**
+   * Drop everything cached. Worker thread only — `removeResource` is annotated
+   * `@WorkerThread`, and it walks the index and the filesystem for every key.
+   */
+  @WorkerThread
+  fun clearCache() {
+    val existing = cache ?: return
+    // Copied before iterating: `removeResource` mutates the set this came from.
+    for (key in existing.keys.toList()) existing.removeResource(key)
+  }
+
+  /**
+   * Drop one track's cached audio, by the host's `MediaId`.
+   *
+   * That is the key because `toMediaItem` sets it as the custom cache key — so
+   * this takes the same id the host uses everywhere else, and does not need a
+   * URI that may since have rotated its token.
+   */
+  @WorkerThread
+  fun evict(id: String) {
+    cache?.removeResource(id)
   }
 
   // MARK: - Lifecycle

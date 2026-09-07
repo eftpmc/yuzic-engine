@@ -242,6 +242,34 @@ class YuzicEngineModule : Module() {
     AsyncFunction("sleepAfter") { seconds: Double -> sleepTimer.schedule(seconds) }
     AsyncFunction("cancelSleep") { sleepTimer.cancel() }
 
+    // MARK: cache
+    //
+    // Deliberately *not* on the main thread: `Cache.removeResource` is
+    // annotated `@WorkerThread` and walks the index and the filesystem for
+    // every key. An `AsyncFunction` body already runs off the main thread,
+    // which is why these do not hop with `onMain` the way the player calls do.
+    //
+    // `configureCache` is still absent, and absent rather than accepted and
+    // ignored. `LeastRecentlyUsedCacheEvictor` takes its limit as a constructor
+    // argument, so honouring a new one means building a second `SimpleCache`
+    // over the same directory — which the class documents as corrupting the
+    // index rather than failing — or releasing the live one out from under two
+    // players mid-track. Calling it on Android throws at the bridge, which is
+    // the truthful answer until one of those has a real fix.
+
+    AsyncFunction("clearCache") { PlaybackService.graph?.clearCache() }
+
+    AsyncFunction("evict") { id: String -> PlaybackService.graph?.evict(id) }
+
+    AsyncFunction("cacheStats") { ->
+      val stats = PlaybackService.graph?.cacheStats()
+      mapOf(
+        "usedBytes" to (stats?.usedBytes ?: 0L),
+        "maxBytes" to (stats?.maxBytes ?: 0L),
+        "entryCount" to (stats?.entryCount ?: 0),
+      )
+    }
+
     // MARK: reading the state, rather than waiting to be told
 
     AsyncFunction("getState") { readPlayer("idle") { stateName(it) } }

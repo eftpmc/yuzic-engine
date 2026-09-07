@@ -120,15 +120,16 @@ export interface AudioEngine {
   // per request and its bytes are not the file, so two plays at different
   // bitrates would be different audio under one id.
   //
-  // NOT IMPLEMENTED on Android — and *absent*, not inert. There is no Kotlin
-  // counterpart to any of these four, and `YuzicEngine.ts` is a straight
-  // pass-through with no platform branching, so calling one on Android throws
-  // at the bridge rather than quietly doing nothing.
+  // `configureCache` is NOT IMPLEMENTED on Android — and *absent*, not inert.
+  // `YuzicEngine.ts` is a straight pass-through with no platform branching, so
+  // calling it there throws at the bridge rather than quietly doing nothing.
   //
   // That is the intended behaviour and not a gap to paper over: a method that
-  // silently does nothing is the thing this file has refused elsewhere. But it
-  // means a host must not call them on Android at all — see the platform table
-  // in the README for the full list of eleven such methods.
+  // silently does nothing is the thing this file has refused elsewhere. Media3
+  // takes the cache limit as a constructor argument to the evictor, so changing
+  // it means a second `SimpleCache` over one directory — documented as
+  // corrupting the index — or releasing the live one mid-track. The other three
+  // do work on both platforms.
 
   configureCache(options: CacheOptions): Promise<void>;
   clearCache(): Promise<void>;
