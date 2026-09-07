@@ -137,7 +137,41 @@ final class PlaybackEngineTests: XCTestCase {
     try engine.play()
 
     XCTAssertEqual(factory.opened, ["b"])
+  }
+
+  /**
+   `play()` means "asked to play", not "playing".
+
+   `TrackPlayback.start` dispatches the decode and returns; the decode blocks
+   on the network. The engine used to announce `.playing` right there, which
+   is why a slow connection could leave a pause button showing over a
+   position frozen at 0:00 with nothing able to say it was still waiting.
+
+   So the state stays `.buffering` until a buffer actually reaches the node.
+   This test asserts both halves — the state immediately after the call, and
+   the transition once audio exists — because the first without the second
+   would pass just as well if playback never started at all.
+   */
+  func testStateIsBufferingUntilAudioActuallyStarts() throws {
+    let (engine, _, _) = try makeEngine()
+
+    var seen: [PlaybackEngine.PlaybackState] = []
+    engine.onEvent = { if case .stateChanged(let state) = $0 { seen.append(state) } }
+
+    engine.setQueue([song("a")], startIndex: 0)
+    try engine.play()
+    XCTAssertEqual(engine.state, .buffering, "announced playing before any audio was scheduled")
+
+    let playing = expectation(description: "reaches playing once a buffer is scheduled")
+    let deadline = Date().addingTimeInterval(5)
+    DispatchQueue.global().async {
+      while Date() < deadline && engine.state != .playing { usleep(10_000) }
+      playing.fulfill()
+    }
+    wait(for: [playing], timeout: 6)
+
     XCTAssertEqual(engine.state, .playing)
+    XCTAssertEqual(seen, [.buffering, .playing], "the host should see the wait, then the start")
   }
 
   func testSkippingMovesTheQueueAndOpensTheNewTrack() throws {

@@ -35,6 +35,21 @@ public final class TrackPlayback {
   /// Fires once the last scheduled buffer has played out.
   public var onEndOfTrack: (() -> Void)?
 
+  /**
+   Fires when the first buffer of this track is handed to the node.
+
+   The gap between `start()` and this is real and can be long: `start` only
+   dispatches, and the decode it dispatches blocks on the network. On a slow
+   connection a large file can sit there for a long time with nothing
+   scheduled and nothing playing, so an engine that announces "playing" at
+   `start()` is announcing something that has not happened.
+
+   Fires at most once, from the decode queue.
+   */
+  public var onFirstBufferScheduled: (() -> Void)?
+
+  private var scheduledAny = false
+
   public init(reader: TrackReader, voice: AudioGraph.Voice, label: String = "decode") {
     self.reader = reader
     self.voice = voice
@@ -74,6 +89,7 @@ public final class TrackPlayback {
     stopped = false
     reachedEnd = false
     scheduledAhead = 0
+    scheduledAny = false
     startFrameValue = frame
     lock.unlock()
 
@@ -157,7 +173,12 @@ public final class TrackPlayback {
           return
         }
 
-        self.lock.lock(); self.scheduledAhead += 1; self.lock.unlock()
+        self.lock.lock()
+        self.scheduledAhead += 1
+        let isFirst = !self.scheduledAny
+        self.scheduledAny = true
+        self.lock.unlock()
+        if isFirst { self.onFirstBufferScheduled?() }
 
         self.voice.player.scheduleBuffer(buffer) { [weak self] in
           guard let self else { return }

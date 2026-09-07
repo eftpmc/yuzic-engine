@@ -332,11 +332,25 @@ public final class PlaybackEngine {
 
     graph.setTrackGain(graph.activeVoice, to: ReplayGain.linearGain(for: track, settings: replayGain))
     graph.cut(graph.activeVoice, to: 1)
+
+    // `.playing` is announced when audio actually starts, not here. `start()`
+    // only dispatches the decode, and that decode blocks on the network — so
+    // on a slow connection this used to report playing while nothing had been
+    // scheduled, and the player sat at 0:00 behind a pause button with no way
+    // to say it was still waiting. Staying in `.buffering` until the first
+    // buffer is handed to the node makes the state mean what it says.
+    playback.onFirstBufferScheduled = { [weak self, weak playback] in
+      DispatchQueue.main.async {
+        guard let self, self.activePlayback === playback, self.state == .buffering else { return }
+        self.state = .playing
+        self.publishNowPlaying()
+      }
+    }
+
     try playback.start(atFrame: frame)
     listenedAccumulated = 0
     listeningSince = now()
 
-    state = .playing
     emit(.trackChanged(index: index, id: track.id, previousListenedSec: previousListenedSec))
     publishNowPlaying()
     startTicking()
