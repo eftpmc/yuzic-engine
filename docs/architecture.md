@@ -414,6 +414,71 @@ entitlement is granted by Apple per app; until it is, none of this appears in a
 car and nothing logs to say why. And yuzic commits its `ios/` directory, so the
 config plugin's Info.plist scene entry lands only on a prebuild.
 
+## 12. How this engine fails
+
+Not a design decision — a record. Every serious defect this engine has shipped
+has had the same shape, and it is worth naming because it is not the shape most
+review looks for. Nothing here threw. Nothing here failed a test suite. Each one
+was code that ran, returned, and accomplished nothing.
+
+**A guard that guards nothing.** `remoteCommandsEnabled` re-registered the lock
+screen's targets only when the value changed. Correct in isolation; the previous
+library's teardown calls `removeTarget(nil)`, which clears every target while
+leaving the flag alone, so the one call that would have restored them was the
+one the guard skipped. The controls were greyed out on every device.
+
+**A function with no callers.** `handleConfigurationChange` was written, was
+correct, and was never invoked. So was `maybeBeginTransition` on Android — the
+whole point of a queue rewrite, compiled and shipped and never once starting a
+crossfade.
+
+**A stub that accepts and discards.** `setCrossfade` on Android took its
+argument, stored it, and no code read it. The API was complete and the feature
+did not exist.
+
+**A curve inherited by the wrong caller.** The sleep timer's fade-out went
+through the crossfade's ramp and got its equal-power curve. Right for two
+uncorrelated sources overlapping; wrong for one source going to silence alone,
+where it holds loud and then drops. `FadeCurve` is now a required argument with
+no default, so the question has to be answered at every call site.
+
+**A command greyed out before it can be sent.** Overriding `seekToNext` is
+useless if `getAvailableCommands` reports there is nowhere to go: the controller
+never sends the command and the override never runs. The button was not being
+ignored — it was disabled before it could be pressed.
+
+**A state announcing an event that has not happened.** The engine went to
+`.playing` when play was requested rather than when the first buffer was
+scheduled, so a track that never buffered showed as playing at 0:00 forever.
+
+The common thread is that all six are invisible to "does it return, and is the
+return value right". What catches them is asking what the code *did* — which
+call ran, which caller reached it, what the user then heard. `Tools/mutate.py`
+automates one slice of this: break a real behaviour, and see whether any test
+notices.
+
+### The instrument is part of the system
+
+Four times the measurement was the fault and the code was fine, and each nearly
+produced a "fix" for a bug that did not exist:
+
+- A **decoder count** that could not distinguish "one track played" from "two
+  tracks shared a codec" — it would have read the same either way, so it was
+  evidence for neither.
+- **`state=NONE(0)`** read as a fault, when nothing had been started yet. An
+  absence is not a failure.
+- **`actions=661`** read as a regression, when 661 was correct: a one-track
+  queue genuinely had nowhere to go.
+- A position of **298265 against a duration of 212741** — not a slow track, a
+  wrong instrument. A number larger than the total it is measured against is a
+  fact about the ruler.
+
+A fifth is in CONTRIBUTING because it is about builds rather than readings: a
+bare `lib/` in `.gitignore` kept all of libvorbis out of every commit while
+`swift test` and the app build both stayed green, because both were being fed
+the working tree. Before believing what a measurement implies, check that it
+could have come out differently.
+
 ## What is not decided yet
 
 The architecture above is settled. What remains is empirical, and there is a

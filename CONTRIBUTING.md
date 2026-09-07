@@ -50,6 +50,11 @@ one of those passed a test suite.
 a time and reports whether any test notices. A test that survives its own
 subject being broken is not a test. Run it when adding one that matters.
 
+Each of those failures is written up with the case it came from in
+[§12 of docs/architecture.md](docs/architecture.md#12-how-this-engine-fails).
+Worth reading once before a first change here: none of them threw, and none of
+them failed a suite.
+
 ## Gates
 
 ```sh
