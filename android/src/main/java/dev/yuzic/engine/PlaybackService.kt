@@ -110,17 +110,34 @@ class PlaybackService : MediaLibraryService() {
     graph.voiceA.player.setAudioAttributes(attributes, true)
     graph.voiceB.player.setAudioAttributes(attributes, true)
 
-    // Two things here, both learned by running it. Media3 keeps a per-process
-    // registry of session ids and refuses a duplicate, and the Builder's
-    // default id is the empty string — so a second session in one process
-    // collides with the first and throws
-    // `IllegalStateException: Session ID must be unique. ID=`, taking the
-    // service down in `onCreate`. That is not hypothetical: a dev-client JS
-    // reload, or the system restarting the service while the old one is still
-    // registered, both reach here twice.
+    // Media3 keeps a per-process registry of session ids and refuses a
+    // duplicate, which took the service down here with
+    // `IllegalStateException: Session ID must be unique. ID=`.
     //
-    // So: never build a second one, and give the first a real id rather than
-    // relying on a default that cannot be unique.
+    // **Read this before trusting the two lines below.** An earlier version of
+    // this comment claimed they prevent a second session. They do not, and the
+    // claim was wrong twice over:
+    //
+    // - `setId` does not create uniqueness. Media3 compares id *values*, so two
+    //   live sessions both called "yuzic-engine" collide exactly as two called
+    //   "" did. What it buys is a legible error rather than `ID=`, which is
+    //   worth having and is not a fix.
+    // - `session` is an instance field (line 38), not companion state like
+    //   `graph` and `queue` above. A *new* service instance therefore always
+    //   sees null and always falls through. The guard can only stop `onCreate`
+    //   running twice on one instance, which Android does not do.
+    //
+    // What actually prevents the collision today is `onDestroy` releasing the
+    // session before a replacement instance is created — which was already
+    // true before any of this was written. So the hazard survives in any
+    // interleaving where the old instance has not been destroyed yet, and the
+    // ordinary stop-then-start path will pass either way.
+    //
+    // Deliberately not "fixed" further until the failing interleaving is known:
+    // the id in the exception tells us which code is running (`ID=` means older
+    // than this; `ID=yuzic-engine` means the fix is in and did not save it),
+    // and guessing at a repair before that evidence exists is how the first
+    // wrong explanation got written.
     if (session == null) {
       session = MediaLibrarySession.Builder(this, EnginePlayer(graph), LibraryCallback())
         .setId(SESSION_ID)
