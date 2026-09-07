@@ -23,7 +23,21 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
   /// end-of-file while under-reporting truncates the track.
   public static let assumedBitrate: Double = 320_000
 
-  public init() {}
+  /**
+   Where fetched audio is kept between tracks. Nil keeps the old behaviour —
+   in memory, for the life of the track — which is what the tests want and
+   what a host that never calls `configureCache` gets.
+
+   Only the ranged path is cached. A transcoded stream is produced on the fly
+   and its bytes are not the file: two plays at different bitrates are
+   different audio under the same id, and storing either as *the* cached copy
+   would serve the wrong one back.
+   */
+  private let cache: DiskCache?
+
+  public init(cache: DiskCache? = nil) {
+    self.cache = cache
+  }
 
   public func makeReader(for track: Track) throws -> AudioFileReader {
     let source = try makeSource(for: track)
@@ -55,7 +69,7 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
       return streamingSource(url: url, track: track)
     }
 
-    let source = CachedByteSource(fetcher: fetcher)
+    let source = CachedByteSource(fetcher: fetcher, cache: cache, cacheId: track.id)
     // MP4-family containers keep `moov` at the tail unless written faststart,
     // and the parser's first reads go there. Without this an ALAC or AAC track
     // will not open until the whole file has landed — confirmed in the spike.

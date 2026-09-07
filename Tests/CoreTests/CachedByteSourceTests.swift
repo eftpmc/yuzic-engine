@@ -195,3 +195,74 @@ private final class BlockingFetcher: ByteFetcher, @unchecked Sendable {
 
   func cancel() { released.signal() }
 }
+
+/// The point of the disk cache, from the reader's side: a second play does not
+/// go back to the network.
+final class CachedByteSourceDiskTests: XCTestCase {
+
+  private var directory: URL!
+
+  override func setUpWithError() throws {
+    directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("yuzic-source-cache-\(UUID().uuidString)")
+  }
+
+  override func tearDownWithError() throws {
+    try? FileManager.default.removeItem(at: directory)
+  }
+
+  func testASecondSourceOverTheSameIdServesFromDisk() throws {
+    let cache = try DiskCache(directory: directory)
+
+    let first = FakeFetcher(bytes: 500_000)
+    let warm = CachedByteSource(fetcher: first, windowBytes: 64 * 1024, cache: cache, cacheId: "track-1")
+    _ = try warm.read(offset: 0, count: 1024)
+    XCTAssertGreaterThan(first.fetched.count, 0, "the first play has to fetch something")
+
+    // A new source, a new fetcher, same id — a later session playing the same
+    // track. Nothing should reach the network.
+    let second = FakeFetcher(bytes: 500_000)
+    let cold = CachedByteSource(fetcher: second, windowBytes: 64 * 1024, cache: cache, cacheId: "track-1")
+    let data = try cold.read(offset: 0, count: 1024)
+
+    XCTAssertEqual(data, first.blob.subdata(in: 0..<1024))
+    XCTAssertTrue(second.fetched.isEmpty, "went to the network for bytes it had on disk")
+  }
+
+  func testADifferentIdDoesNotShareBytes() throws {
+    let cache = try DiskCache(directory: directory)
+
+    let one = FakeFetcher(bytes: 200_000)
+    let a = CachedByteSource(fetcher: one, windowBytes: 64 * 1024, cache: cache, cacheId: "track-a")
+    _ = try a.read(offset: 0, count: 512)
+
+    let two = FakeFetcher(bytes: 200_000)
+    let b = CachedByteSource(fetcher: two, windowBytes: 64 * 1024, cache: cache, cacheId: "track-b")
+    _ = try b.read(offset: 0, count: 512)
+
+    XCTAssertFalse(two.fetched.isEmpty, "track-b was served track-a's audio")
+  }
+
+  func testWithoutACacheNothingIsWrittenAnywhere() throws {
+    let fetcher = FakeFetcher(bytes: 100_000)
+    let source = CachedByteSource(fetcher: fetcher, windowBytes: 64 * 1024)
+    _ = try source.read(offset: 0, count: 512)
+    // The pre-cache behaviour still has to work: hosts that never configure a
+    // cache, and every other test in this file, run through this path.
+    XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+  }
+
+  func testEvictingSendsTheNextReadBackToTheNetwork() throws {
+    let cache = try DiskCache(directory: directory)
+    let first = FakeFetcher(bytes: 200_000)
+    let warm = CachedByteSource(fetcher: first, windowBytes: 64 * 1024, cache: cache, cacheId: "track-1")
+    _ = try warm.read(offset: 0, count: 512)
+
+    cache.evict("track-1")
+
+    let second = FakeFetcher(bytes: 200_000)
+    let cold = CachedByteSource(fetcher: second, windowBytes: 64 * 1024, cache: cache, cacheId: "track-1")
+    _ = try cold.read(offset: 0, count: 512)
+    XCTAssertFalse(second.fetched.isEmpty, "evict did not actually remove the audio")
+  }
+}

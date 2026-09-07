@@ -23,6 +23,22 @@ public final class YuzicEngineModule: Module {
   private var graph: AudioGraph?
   private var engine: PlaybackEngine?
   private var sleepTimer: SleepTimer?
+  private var cache: DiskCache?
+
+  /**
+   Caches (which iOS may delete under pressure) rather than Documents.
+
+   Audio here is re-fetchable by definition — it came from a server and the id
+   that keyed it will fetch it again. Putting it in Documents would back it up
+   to iCloud and count against the user's storage forever, for bytes the app
+   can always get back. Offline *downloads* are a different feature with
+   different expectations, and they belong somewhere else when they arrive.
+   */
+  private static func defaultCacheDirectory() -> URL {
+    let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+      ?? URL(fileURLWithPath: NSTemporaryDirectory())
+    return base.appendingPathComponent("yuzic-engine/audio", isDirectory: true)
+  }
 
   public func definition() -> ModuleDefinition {
     Name("YuzicEngine")
@@ -37,7 +53,11 @@ public final class YuzicEngineModule: Module {
       if self.engine == nil {
         let graph = AudioGraph()
         try graph.start()
-        let engine = PlaybackEngine(graph: graph, factory: HTTPTrackReaderFactory())
+        // A cache that cannot be created is not a reason to refuse to play —
+        // the engine worked without one until now, and falls back to that.
+        let cache = try? DiskCache(directory: Self.defaultCacheDirectory())
+        self.cache = cache
+        let engine = PlaybackEngine(graph: graph, factory: HTTPTrackReaderFactory(cache: cache))
         engine.onEvent = { [weak self] event in self?.forward(event) }
         self.graph = graph
         self.engine = engine
@@ -150,6 +170,34 @@ public final class YuzicEngineModule: Module {
 
     AsyncFunction("setSpeed") { (speed: Double) in
       self.graph?.setSpeed(Float(speed))
+    }
+
+    // MARK: cache
+    //
+    // These four were declared in src/AudioEngine.ts and existed nowhere, so
+    // calling one failed with "function not found" — which the comment there
+    // described as throwing rather than quietly doing nothing, and preferred
+    // to a method that lies. They do something now.
+
+    AsyncFunction("configureCache") { (options: CacheOptionsRecord) in
+      self.cache?.configure(maxBytes: Int64(options.maxBytes))
+    }
+
+    AsyncFunction("clearCache") {
+      self.cache?.clear()
+    }
+
+    AsyncFunction("cacheStats") { () -> [String: Any] in
+      let stats = self.cache?.stats()
+      return [
+        "usedBytes": stats?.usedBytes ?? 0,
+        "maxBytes": stats?.maxBytes ?? 0,
+        "entryCount": stats?.entryCount ?? 0,
+      ]
+    }
+
+    AsyncFunction("evict") { (id: String) in
+      self.cache?.evict(id)
     }
 
     // MARK: sleep timer
@@ -320,6 +368,13 @@ struct EqBandRecord: Record {
   @Field var frequencyHz: Double = 0
   @Field var gainDb: Double = 0
   @Field var q: Double?
+}
+
+struct CacheOptionsRecord: Record {
+  @Field var maxBytes: Double = Double(DiskCache.defaultMaxBytes)
+  /// Carried because `CacheOptions` declares it, and honoured by the queue's
+  /// preload rather than by the cache — the cache stores what it is given.
+  @Field var preloadCount: Int = 2
 }
 
 struct ReplayGainRecord: Record {

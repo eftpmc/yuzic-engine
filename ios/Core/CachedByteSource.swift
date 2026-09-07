@@ -84,9 +84,29 @@ public final class CachedByteSource {
   /// the start of the file to the seek point.
   public private(set) var requestLog: [Range<Int64>] = []
 
-  public init(fetcher: ByteFetcher, windowBytes: Int64 = CachedByteSource.defaultWindowBytes) {
+  /**
+   Where fetched windows are also kept, and looked for first.
+
+   Optional because most of this class's tests have no business touching a
+   filesystem, and because the reader works without one — a nil cache is
+   exactly the in-memory-only behaviour that existed before there was a disk.
+
+   `cacheId` is the host's `MediaId` rather than the URL, for the reason
+   `DiskCache` gives: stream URLs carry a rotating token.
+   */
+  private let cache: DiskCache?
+  private let cacheId: MediaId?
+
+  public init(
+    fetcher: ByteFetcher,
+    windowBytes: Int64 = CachedByteSource.defaultWindowBytes,
+    cache: DiskCache? = nil,
+    cacheId: MediaId? = nil
+  ) {
     self.fetcher = fetcher
     self.windowBytes = max(4096, windowBytes)
+    self.cache = cache
+    self.cacheId = cacheId
     self.storage = Data()
   }
 
@@ -178,13 +198,27 @@ public final class CachedByteSource {
       let windowEnd = min(total, max(gap.upperBound, windowStart + windowBytes))
       let toFetch = windowStart..<windowEnd
 
+      // Disk before network. A window already on disk costs a seek and a read
+      // rather than a request, which is the entire point of the cache — and it
+      // is checked per window rather than per track so a half-fetched track
+      // resumes from wherever it got to.
       let data: Data
-      do {
-        data = try fetcher.fetch(toFetch)
-      } catch let error as ByteSourceError {
-        throw error
-      } catch {
-        throw ByteSourceError.fetchFailed(String(describing: error))
+      if let cache, let cacheId, let onDisk = cache.read(cacheId, range: toFetch) {
+        data = onDisk
+      } else {
+        do {
+          data = try fetcher.fetch(toFetch)
+        } catch let error as ByteSourceError {
+          throw error
+        } catch {
+          throw ByteSourceError.fetchFailed(String(describing: error))
+        }
+        // Written through immediately rather than at end of track: a track
+        // abandoned halfway is exactly the one worth having kept, and there is
+        // no "end" for the listener who skipped.
+        if let cache, let cacheId, !data.isEmpty {
+          cache.write(cacheId, offset: toFetch.lowerBound, data: data, totalBytes: total)
+        }
       }
 
       lock.lock()
