@@ -8,6 +8,26 @@ import AVFoundation
 // be correct for the package and wrong for every real build.
 
 /**
+ A command arrived before `setup` built the engine.
+
+ Worth an error rather than a shrug. Every command below used to be
+ `self.engine?.doThing()`, and optional chaining on a nil engine is a silent
+ no-op — the call crosses the bridge, resolves successfully, and nothing
+ happens. That produced a bug where the app opened on a cold launch, showed
+ the track and sat paused: `setup` was still claiming the audio session while
+ the restored queue issued `setQueue` and `play`, and both vanished.
+
+ The host now serialises its calls behind `setup`, so this should never be
+ raised. That is exactly why it should exist and say so: if it is ever seen,
+ the ordering guarantee has broken and the alternative is silence.
+ */
+internal final class EngineNotSetUpException: Exception {
+  override var reason: String {
+    "the engine is not set up — call setup() and wait for it before any command"
+  }
+}
+
+/**
  The Expo module surface — the thin part. Everything of substance lives in
  `AudioGraph`, `Queue` and the cache; this file only translates.
 
@@ -24,6 +44,18 @@ public final class YuzicEngineModule: Module {
   private var engine: PlaybackEngine?
   private var sleepTimer: SleepTimer?
   private var cache: DiskCache?
+
+  /**
+   The engine, or a named failure.
+
+   Used by every *command*. Getters keep their defaults on purpose: "nothing
+   is playing" is a truthful answer before setup, and a progress poll that
+   throws during launch would be noise rather than signal.
+   */
+  private func requireEngine() throws -> PlaybackEngine {
+    guard let engine else { throw EngineNotSetUpException() }
+    return engine
+  }
 
   /**
    Caches (which iOS may delete under pressure) rather than Documents.
@@ -71,6 +103,9 @@ public final class YuzicEngineModule: Module {
     }
 
     AsyncFunction("teardown") {
+      // Optional on purpose, unlike the commands: tearing down something that
+      // was never set up is a no-op, not a failure. A host cleaning up after a
+      // failed launch should not be handed an error for tidying.
       self.engine?.stop()
       self.engine = nil
       self.graph?.stop()
@@ -86,12 +121,12 @@ public final class YuzicEngineModule: Module {
     // has to update, and the car still has to answer its buttons.
 
     AsyncFunction("setQueue") { (tracks: [TrackRecord], startIndex: Int?) in
-      self.engine?.setQueue(tracks.map(\.asTrack), startIndex: startIndex ?? 0)
+      try self.requireEngine().setQueue(tracks.map(\.asTrack), startIndex: startIndex ?? 0)
       self.sendEvent("onQueueChange", [:])
     }
 
     AsyncFunction("append") { (tracks: [TrackRecord]) in
-      self.engine?.queue.append(tracks.map(\.asTrack))
+      try self.requireEngine().queue.append(tracks.map(\.asTrack))
       self.sendEvent("onQueueChange", [:])
     }
 
@@ -109,22 +144,22 @@ public final class YuzicEngineModule: Module {
     // keep the second from happening as a side effect of the first.
 
     AsyncFunction("insertAt") { (index: Int, tracks: [TrackRecord]) in
-      self.engine?.queue.insert(tracks.map(\.asTrack), at: index)
+      try self.requireEngine().queue.insert(tracks.map(\.asTrack), at: index)
       self.sendEvent("onQueueChange", [:])
     }
 
     AsyncFunction("removeAt") { (index: Int) in
-      self.engine?.queue.remove(at: index)
+      try self.requireEngine().queue.remove(at: index)
       self.sendEvent("onQueueChange", [:])
     }
 
     AsyncFunction("move") { (fromIndex: Int, toIndex: Int) in
-      self.engine?.queue.move(from: fromIndex, to: toIndex)
+      try self.requireEngine().queue.move(from: fromIndex, to: toIndex)
       self.sendEvent("onQueueChange", [:])
     }
 
     AsyncFunction("clearQueue") {
-      self.engine?.queue.clear()
+      try self.requireEngine().queue.clear()
       self.sendEvent("onQueueChange", [:])
     }
 
@@ -133,7 +168,7 @@ public final class YuzicEngineModule: Module {
     }
 
     AsyncFunction("setRepeatMode") { (mode: String) in
-      self.engine?.queue.repeatMode = RepeatMode(rawValue: mode) ?? .off
+      try self.requireEngine().queue.repeatMode = RepeatMode(rawValue: mode) ?? .off
     }
 
     // MARK: transport
@@ -157,13 +192,13 @@ public final class YuzicEngineModule: Module {
       ]
     }
 
-    AsyncFunction("play") { try self.engine?.play() }
-    AsyncFunction("pause") { self.engine?.pause() }
-    AsyncFunction("stop") { self.engine?.stop() }
-    AsyncFunction("seekTo") { (positionSec: Double) in try self.engine?.seek(toSeconds: positionSec) }
-    AsyncFunction("skipToNext") { try self.engine?.skipToNext() }
-    AsyncFunction("skipToPrevious") { try self.engine?.skipToPrevious() }
-    AsyncFunction("skipToIndex") { (index: Int) in try self.engine?.skipTo(index: index) }
+    AsyncFunction("play") { try self.requireEngine().play() }
+    AsyncFunction("pause") { try self.requireEngine().pause() }
+    AsyncFunction("stop") { try self.requireEngine().stop() }
+    AsyncFunction("seekTo") { (positionSec: Double) in try self.requireEngine().seek(toSeconds: positionSec) }
+    AsyncFunction("skipToNext") { try self.requireEngine().skipToNext() }
+    AsyncFunction("skipToPrevious") { try self.requireEngine().skipToPrevious() }
+    AsyncFunction("skipToIndex") { (index: Int) in try self.requireEngine().skipTo(index: index) }
     AsyncFunction("setVolume") { (volume: Double) in
       self.graph.map { $0.activeVoice.gain.outputVolume = Float(max(0, min(1, volume))) }
     }
@@ -221,11 +256,11 @@ public final class YuzicEngineModule: Module {
      to do. The figures are already in the files.
      */
     AsyncFunction("setReplayGain") { (options: ReplayGainRecord) in
-      self.engine?.replayGain = options.asSettings
+      try self.requireEngine().replayGain = options.asSettings
     }
 
     AsyncFunction("setCrossfade") { (options: CrossfadeRecord?) in
-      self.engine?.queue.crossfade = options?.asSettings
+      try self.requireEngine().queue.crossfade = options?.asSettings
     }
 
     /**
@@ -245,8 +280,15 @@ public final class YuzicEngineModule: Module {
         // Played natively rather than round-tripped through JS, for the same
         // reason the tree is: nothing may be listening. The host finds out
         // afterwards through the ordinary track-change event.
-        self.engine?.setQueue(tracks, startIndex: index)
-        try? self.engine?.play()
+        // Cannot throw across this handler, so a missing engine is logged
+        // rather than dropped in silence — a car showing a track that never
+        // plays is the worst place to have to guess why.
+        guard let engine = self.engine else {
+          NSLog("[yuzic-engine] CarPlay selection ignored: engine not set up")
+          return
+        }
+        engine.setQueue(tracks, startIndex: index)
+        try? engine.play()
         self.sendEvent("onQueueChange", [:])
       }
     }
@@ -262,7 +304,7 @@ public final class YuzicEngineModule: Module {
       // An unrecognised name is dropped rather than defaulted. Advertising a
       // control the host never asked for is how a car ends up with a button
       // that does nothing.
-      self.engine?.remoteCommands = commands.compactMap { RemoteCommand(rawValue: $0) }
+      try self.requireEngine().remoteCommands = commands.compactMap { RemoteCommand(rawValue: $0) }
     }
 
     AsyncFunction("clearBrowseTree") {
@@ -277,14 +319,15 @@ public final class YuzicEngineModule: Module {
       // buffer, so bit-perfect output and a crossfade in progress cannot
       // coexist. Resolved here rather than left as two settings that fight.
       let resolved = SampleRateMode(rawValue: mode) ?? .fixed
-      if resolved == .matchSource, self.engine?.queue.crossfade != nil {
-        self.engine?.queue.crossfade = nil
+      let engine = try self.requireEngine()
+      if resolved == .matchSource, engine.queue.crossfade != nil {
+        engine.queue.crossfade = nil
         self.sendEvent("onError", [
           "code": "CROSSFADE_DISABLED",
           "message": "Crossfade turned off: the hardware sample rate cannot change mid-fade.",
         ])
       }
-      self.engine?.queue.sampleRateMode = resolved
+      engine.queue.sampleRateMode = resolved
     }
   }
 
