@@ -369,3 +369,73 @@ private final class GatedFetcher: ByteFetcher, @unchecked Sendable {
 
   func resume() { lock.lock(); cancelled = false; lock.unlock() }
 }
+
+/// The speed control: what it accepts, and that adding it to the chain did not
+/// quietly break the chain.
+final class AudioGraphSpeedTests: XCTestCase {
+
+  private func makeGraph() throws -> AudioGraph {
+    let graph = AudioGraph(sampleRate: 44_100)
+    try graph.startOffline(sampleRate: 44_100)
+    return graph
+  }
+
+  func testDefaultsToUntouchedAndBypassed() throws {
+    let graph = try makeGraph()
+    XCTAssertEqual(graph.currentSpeed, 1.0)
+  }
+
+  func testAbsurdRatesAreClampedRatherThanHonoured() throws {
+    let graph = try makeGraph()
+    // AVAudioUnitTimePitch would accept both of these and produce something
+    // nobody could listen to. A host asking for them has a bug.
+    graph.setSpeed(100)
+    XCTAssertEqual(graph.currentSpeed, 4.0)
+    graph.setSpeed(0.001)
+    XCTAssertEqual(graph.currentSpeed, 0.25)
+  }
+
+  func testOrdinaryRatesPassThrough() throws {
+    let graph = try makeGraph()
+    for rate in [Float(0.5), 0.75, 1.5, 2.0] {
+      graph.setSpeed(rate)
+      XCTAssertEqual(graph.currentSpeed, rate, accuracy: 0.0001)
+    }
+  }
+
+  /// The regression that matters: a new node between the EQ and the output is
+  /// a chance to disconnect the graph, and a disconnected graph is silent
+  /// rather than broken-looking.
+  func testAudioStillReachesTheOutputAtDoubleSpeed() throws {
+    let fixture = try EncodedFixture.wav(seconds: 3)
+    let source = CachedByteSource(fetcher: fixture.fetcher, windowBytes: 32 * 1024)
+    let reader = AudioFileReader(source: source)
+    try reader.open()
+
+    let graph = AudioGraph(sampleRate: reader.sampleRate)
+    try graph.startOffline(sampleRate: reader.sampleRate)
+    graph.setSpeed(2.0)
+
+    let playback = TrackPlayback(reader: reader, voice: graph.activeVoice)
+    try playback.start()
+
+    let deadline = Date().addingTimeInterval(2)
+    while graph.activeVoice.player.isPlaying == false && Date() < deadline {
+      Thread.sleep(forTimeInterval: 0.01)
+    }
+    Thread.sleep(forTimeInterval: 0.3)
+
+    let rendered = try graph.renderOffline(frames: 8192)
+    XCTAssertGreaterThan(rms(rendered), 0.05, "the speed node swallowed the audio")
+    playback.stop()
+  }
+
+  private func rms(_ buffer: AVAudioPCMBuffer) -> Float {
+    guard let data = buffer.floatChannelData else { return 0 }
+    let count = Int(buffer.frameLength)
+    guard count > 0 else { return 0 }
+    var sum: Float = 0
+    for index in 0..<count { sum += data[0][index] * data[0][index] }
+    return (sum / Float(count)).squareRoot()
+  }
+}

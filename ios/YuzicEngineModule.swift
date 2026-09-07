@@ -148,6 +148,10 @@ public final class YuzicEngineModule: Module {
       self.graph.map { $0.activeVoice.gain.outputVolume = Float(max(0, min(1, volume))) }
     }
 
+    AsyncFunction("setSpeed") { (speed: Double) in
+      self.graph?.setSpeed(Float(speed))
+    }
+
     // MARK: sleep timer
 
     AsyncFunction("sleepAfter") { (seconds: Double) in self.sleepTimer?.schedule(after: seconds) }

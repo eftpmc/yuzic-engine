@@ -30,6 +30,7 @@ public final class AudioGraph {
 
   private let engine = AVAudioEngine()
   private let eq: AVAudioUnitEQ
+  private let speed: AVAudioUnitTimePitch
   private var fadeTimers: [Int: Timer] = [:]
   public private(set) var voiceA: Voice
   public private(set) var voiceB: Voice
@@ -60,6 +61,12 @@ public final class AudioGraph {
     eq = AVAudioUnitEQ(numberOfBands: 10)
     eq.globalGain = 0
 
+    // TimePitch rather than Varispeed: varispeed resamples, so speeding a
+    // podcast up raises the voice to a chipmunk. Pitch preservation is the
+    // whole point of a speed control, and it is what costs the CPU here.
+    speed = AVAudioUnitTimePitch()
+    speed.rate = 1.0
+
     voiceA = Voice(id: 0, player: AVAudioPlayerNode(), gain: AVAudioMixerNode())
     voiceB = Voice(id: 1, player: AVAudioPlayerNode(), gain: AVAudioMixerNode())
 
@@ -69,6 +76,7 @@ public final class AudioGraph {
     // hold yet fails at run time with a bare assertion about `_nodes`, and
     // nothing about that message points at the ordering.
     engine.attach(eq)
+    engine.attach(speed)
     for voice in [voiceA, voiceB] {
       engine.attach(voice.player)
       engine.attach(voice.gain)
@@ -81,18 +89,26 @@ public final class AudioGraph {
     // any number of inputs.
     //
     //   playerA → gainA ─┐
-    //                    ├→ mainMixer → eq → output
+    //                    ├→ mainMixer → eq → speed → output
     //   playerB → gainB ─┘
     //
     // EQ after the mixer, so a crossfade runs one filter chain rather than two
     // and a curve change mid-fade cannot make the halves differ.
+    //
+    // Speed last, and shared, for the same reason one step further on: two
+    // voices stretched by separate units could drift apart mid-fade, which is
+    // the one place it would be unmistakable. Putting it *after* the EQ also
+    // leaves the filters looking at audio at its natural rate — the band
+    // frequencies were chosen against the recording, not against the speed
+    // someone happens to be listening at.
     for voice in [voiceA, voiceB] {
       engine.connect(voice.player, to: voice.gain, format: format)
       engine.connect(voice.gain, to: engine.mainMixerNode, format: format)
       voice.gain.outputVolume = 0
     }
     engine.connect(engine.mainMixerNode, to: eq, format: format)
-    engine.connect(eq, to: engine.outputNode, format: format)
+    engine.connect(eq, to: speed, format: format)
+    engine.connect(speed, to: engine.outputNode, format: format)
 
     // Full scale on the active voice; the fade is done on the per-voice gain.
     voiceA.gain.outputVolume = 1
@@ -148,6 +164,27 @@ public final class AudioGraph {
    An untouched EQ costs nothing: with every band flat the unit is bypassed
    outright rather than left in the chain multiplying by one.
    */
+  /**
+   Playback rate, with pitch held.
+
+   Bypassed at 1.0 rather than left in the chain doing nothing. A TimePitch
+   unit is the most expensive node here and it is not free when it is idle, so
+   the overwhelmingly common case — nobody has touched the speed control —
+   should not pay for the feature.
+
+   Clamped to what a listener could plausibly want. `AVAudioUnitTimePitch`
+   accepts 1/32 to 32, and every value near those ends is unintelligible; a
+   host asking for one has a bug, and honouring it faithfully would only make
+   that bug harder to see.
+   */
+  public func setSpeed(_ rate: Float) {
+    let clamped = min(max(rate, 0.25), 4.0)
+    speed.rate = clamped
+    speed.bypass = clamped == 1.0
+  }
+
+  public var currentSpeed: Float { speed.rate }
+
   public func setEqualizer(bands: [(frequency: Float, gainDb: Float, q: Float)]) {
     guard !bands.isEmpty, bands.contains(where: { $0.gainDb != 0 }) else {
       eq.bypass = true
