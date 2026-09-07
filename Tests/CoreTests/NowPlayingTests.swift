@@ -21,6 +21,58 @@ final class NowPlayingTests: XCTestCase {
       isPlaying: isPlaying, rate: rate, isLive: isLive)
   }
 
+  // MARK: - The lock screen's fix point
+
+  /**
+   The bug: a paused lock screen showing an *earlier* time than the playing
+   one did a moment before — 1:29 against 1:34, reported from a real build.
+
+   `elapsedPlaybackTime` is a fix point iOS extrapolates from at the playback
+   rate, and the engine deliberately does not re-send it every tick because
+   that makes the timer stutter. But the engine's position comes from rendered
+   frames, which stop advancing during a buffering stall while the wall clock
+   does not, so the lock screen drifts ahead of the audio. Pausing publishes
+   the truth and the number jumps back.
+   */
+  private let epoch = Date(timeIntervalSince1970: 1_000_000)
+
+  func testNoRepublishWhileTheScreenAgreesWithTheAudio() {
+    // Published 10s ago at 30s, and the audio really is at 40s.
+    XCTAssertFalse(PlaybackEngine.shouldRepublish(
+      actual: 40, published: 30, publishedAt: epoch, now: epoch.addingTimeInterval(10)
+    ))
+  }
+
+  func testRepublishWhenTheScreenHasRunAhead() {
+    // A five-second stall: the screen would be showing 40s, the audio is at 35.
+    XCTAssertTrue(PlaybackEngine.shouldRepublish(
+      actual: 35, published: 30, publishedAt: epoch, now: epoch.addingTimeInterval(10)
+    ))
+  }
+
+  /// Symmetric, though drift is one-sided in practice — rendered frames fall
+  /// behind wall clock and never run ahead of it.
+  func testRepublishWhenTheScreenHasFallenBehind() {
+    XCTAssertTrue(PlaybackEngine.shouldRepublish(
+      actual: 45, published: 30, publishedAt: epoch, now: epoch.addingTimeInterval(10)
+    ))
+  }
+
+  /// Under the threshold nothing is sent, or the timer stutters — which is
+  /// the problem the sparse publishing exists to avoid.
+  func testSmallDriftIsLeftAlone() {
+    XCTAssertFalse(PlaybackEngine.shouldRepublish(
+      actual: 39.5, published: 30, publishedAt: epoch, now: epoch.addingTimeInterval(10)
+    ))
+  }
+
+  /// Nothing published yet: send one.
+  func testRepublishWhenThereIsNoFixPoint() {
+    XCTAssertTrue(PlaybackEngine.shouldRepublish(
+      actual: 10, published: nil, publishedAt: nil, now: epoch
+    ))
+  }
+
   // MARK: - Artwork
 
   /**

@@ -66,6 +66,24 @@ public final class PlaybackEngine {
   private var listenedAccumulated: TimeInterval = 0
   private var listeningSince: Date?
 
+  /**
+   The fix point the lock screen is extrapolating from.
+
+   `elapsedPlaybackTime` is a fix point, not a clock: iOS advances it itself
+   using the rate, which is why it is not re-sent on every tick — doing that
+   four times a second makes the lock-screen timer visibly stutter as it is
+   yanked back to a value already going stale.
+
+   But the engine's position comes from *rendered* frames, and those stop
+   advancing during a buffering stall while the wall clock does not. So the
+   two drift apart, always in the same direction: the lock screen runs ahead
+   of the audio. Pausing publishes the truth and the number jumps backwards —
+   which is what a listener sees, as a paused screen showing an earlier time
+   than the playing one did a moment before.
+   */
+  private var publishedPosition: Double?
+  private var publishedAt: Date?
+
   /// Injectable so the listened-time tests do not have to sleep.
   private let now: () -> Date
 
@@ -154,10 +172,13 @@ public final class PlaybackEngine {
   private func publishNowPlaying() {
     guard let track = queue.activeTrack, let reader = activeReader else {
       nowPlaying.clear()
+      publishedPosition = nil
       return
     }
     let sampleRate = reader.sampleRate > 0 ? reader.sampleRate : 44_100
     let position = Double(activePlayback?.currentFrame ?? 0) / sampleRate
+    publishedPosition = position
+    publishedAt = now()
     nowPlaying.update(
       .init(
         title: track.title,
@@ -353,6 +374,29 @@ public final class PlaybackEngine {
   // MARK: - The crossfade
 
   /**
+   Whether the lock screen's fix point needs re-sending.
+
+   True when what iOS is showing — the last published position plus the wall
+   time since, since it extrapolates at the playback rate — has drifted from
+   the real position by more than a second. A second is under the threshold
+   where a listener would notice a correction, and well above the jitter of
+   a tick that runs four times a second.
+
+   Pure, so the threshold and the direction can be tested without a lock
+   screen. Direction matters: drift is one-sided in practice, because
+   rendered frames fall behind wall clock during a stall and never run ahead
+   of it, but this is written symmetrically rather than assuming that.
+   */
+  static func shouldRepublish(
+    actual: Double, published: Double?, publishedAt: Date?, now: Date,
+    tolerance: Double = 1.0
+  ) -> Bool {
+    guard let published, let publishedAt else { return true }
+    let expected = published + now.timeIntervalSince(publishedAt)
+    return abs(actual - expected) > tolerance
+  }
+
+  /**
    Whether it is time to start fading into the next track.
 
    Pure, and separated out because it is the one piece of this worth testing
@@ -397,6 +441,18 @@ public final class PlaybackEngine {
     // and the answer to a direct question cannot drift apart.
     let (position, duration, buffered) = progress
     emit(.progress(positionSec: position, durationSec: duration, bufferedSec: buffered))
+
+    // Correct the lock screen when it has drifted, rather than on a timer.
+    // Re-sending the fix point every tick stutters; leaving it alone lets the
+    // error accumulate for the length of a track. Doing it only when the two
+    // actually disagree costs one comparison and bounds the error at the
+    // threshold.
+    if state == .playing, Self.shouldRepublish(
+      actual: position, published: publishedPosition,
+      publishedAt: publishedAt, now: now()
+    ) {
+      publishNowPlaying()
+    }
 
     guard !transitioning else { return }
     let fade = queue.transitionDuration(userInitiated: false)
