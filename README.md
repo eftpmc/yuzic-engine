@@ -70,7 +70,10 @@ next; read the queue, the active item and its index.
 
 ## What it should do that today's players can't
 
-- **Crossfade** between tracks.
+- **Crossfade** between tracks. Runs: two sources overlapping, the transition
+  begun by the engine's own tick and the track change landing at the fade's
+  midpoint. Same rate, on the simulator — mixed rates, a real device and
+  Bluetooth are open question 4.
 - **DSP**: a working equalizer, replay gain / normalisation.
 - Whatever the audio-graph architecture makes cheap once it exists.
 

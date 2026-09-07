@@ -439,6 +439,14 @@ go/no-go:
    corrected to match iOS.
 4. **Two nodes at 44.1 and 96 crossfaded through the mixer**, on device and
    over Bluetooth. Decide mixer SRC versus `AVAudioConverter` by listening.
+
+   The plain case now runs: two tracks overlapping, the transition started by
+   the engine's own tick rather than by being told, with the track change
+   landing at the fade's midpoint where §1 says it should. Driven from yuzic's
+   smoke test, on the simulator. So the graph does what it was built for — but
+   this question is not answered by that. What is still unmeasured is the part
+   that motivated it: **differing sample rates**, a **real device**, and
+   **Bluetooth**, none of which a simulator playing two 44.1kHz files exercises.
 5. **Configuration-change survival**: pull the route mid-crossfade, confirm the
    rebuild resumes at the right frame with nothing repeated or dropped.
 6. ~~Against real servers: does `/rest/stream` honour `Range` when
