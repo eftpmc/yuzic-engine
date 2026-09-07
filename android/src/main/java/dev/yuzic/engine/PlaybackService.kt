@@ -114,30 +114,33 @@ class PlaybackService : MediaLibraryService() {
     // duplicate, which took the service down here with
     // `IllegalStateException: Session ID must be unique. ID=`.
     //
-    // **Read this before trusting the two lines below.** An earlier version of
-    // this comment claimed they prevent a second session. They do not, and the
-    // claim was wrong twice over:
+    // **`setId` is the fix, and the other party is not us.** `@rntp/player`
+    // also builds a `MediaLibrarySession`, and it also takes Media3's default
+    // empty id. In a host that runs rntp as its player while the engine is
+    // loaded beside it, both ask for `""` and the second one throws. Confirmed
+    // on a device: `dumpsys media_session` lists
+    // `androidx.media3.session.id.` and `androidx.media3.session.id.yuzic-engine`
+    // in one process, and `dumpsys activity services` shows
+    // `TrackPlayerPlaybackService` and this one under the same pid.
     //
-    // - `setId` does not create uniqueness. Media3 compares id *values*, so two
-    //   live sessions both called "yuzic-engine" collide exactly as two called
-    //   "" did. What it buys is a legible error rather than `ID=`, which is
-    //   worth having and is not a fix.
-    // - `session` is an instance field (line 38), not companion state like
-    //   `graph` and `queue` above. A *new* service instance therefore always
-    //   sees null and always falls through. The guard can only stop `onCreate`
-    //   running twice on one instance, which Android does not do.
+    // So the id has to be *ours*, not merely non-empty. Any name would do; the
+    // thing that matters is not sharing a namespace with another library that
+    // never expected company.
     //
-    // What actually prevents the collision today is `onDestroy` releasing the
-    // session before a replacement instance is created — which was already
-    // true before any of this was written. So the hazard survives in any
-    // interleaving where the old instance has not been destroyed yet, and the
-    // ordinary stop-then-start path will pass either way.
+    // Two earlier versions of this comment were wrong, in opposite directions.
+    // The first said the empty string was the defect — it was not, `""` is a
+    // fine unique id for one session. The second said `setId` fixed nothing
+    // because two sessions named "yuzic-engine" would collide too — true, and
+    // irrelevant, because there was never a second engine session. Both
+    // guessed at the second party instead of looking for it.
     //
-    // Deliberately not "fixed" further until the failing interleaving is known:
-    // the id in the exception tells us which code is running (`ID=` means older
-    // than this; `ID=yuzic-engine` means the fix is in and did not save it),
-    // and guessing at a repair before that evidence exists is how the first
-    // wrong explanation got written.
+    // `session == null` below is instance state and cannot see across service
+    // instances, so it is inert. Left in place: it costs nothing and the
+    // condition it names is real even if it is not the one that happened. Do
+    // not "fix" it by moving the handle to the companion — the two-engine-
+    // session case it would guard against has not been shown to be reachable,
+    // and a shared handle brings its own hazard of one instance releasing
+    // another's live session.
     if (session == null) {
       session = MediaLibrarySession.Builder(this, EnginePlayer(graph), LibraryCallback())
         .setId(SESSION_ID)

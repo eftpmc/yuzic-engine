@@ -579,9 +579,23 @@ class YuzicEngineModule : Module() {
    */
   private fun configureAudioSession(pauseOnBecomingNoisy: Boolean) {
     val context = appContext.reactContext ?: throw Exceptions.ReactContextLost()
-    PlaybackService.graph?.let { graph ->
-      graph.voiceA.player.setHandleAudioBecomingNoisy(pauseOnBecomingNoisy)
-      graph.voiceB.player.setHandleAudioBecomingNoisy(pauseOnBecomingNoisy)
+
+    // `onMain`, like every other player touch — this is the rule stated in the
+    // transport section above, and these four lines were the one place that
+    // broke it.
+    //
+    // It survived because of *when* it fails. On the first `setup()` of a
+    // process the service does not exist yet (it is started by the
+    // `buildAsync` below), so `graph` is null, the block is skipped, and
+    // nothing is touched from the wrong thread. Every call after that finds a
+    // graph and throws `Player is accessed on the wrong thread` — which broke
+    // the idempotency the comment below promises, and meant only the first
+    // probe of an app launch could run.
+    onMain {
+      PlaybackService.graph?.let { graph ->
+        graph.voiceA.player.setHandleAudioBecomingNoisy(pauseOnBecomingNoisy)
+        graph.voiceB.player.setHandleAudioBecomingNoisy(pauseOnBecomingNoisy)
+      }
     }
 
     // Idempotent, as the contract in src/AudioEngine.ts requires: a second call
