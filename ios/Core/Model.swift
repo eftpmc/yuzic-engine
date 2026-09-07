@@ -87,3 +87,11 @@ public enum SampleRateMode: String {
   case fixed
   case matchSource = "match-source"
 }
+
+/// Matches `RepeatMode` in src/types.ts. Raw values are the wire strings, so a
+/// rename on either side fails to decode rather than quietly meaning `off`.
+public enum RepeatMode: String {
+  case off
+  case one
+  case all
+}

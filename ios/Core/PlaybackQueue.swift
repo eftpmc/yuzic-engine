@@ -18,6 +18,7 @@ public final class PlaybackQueue {
 
   public var crossfade: CrossfadeSettings?
   public var sampleRateMode: SampleRateMode = .fixed
+  public var repeatMode: RepeatMode = .off
 
   public init() {}
 
@@ -30,13 +31,93 @@ public final class PlaybackQueue {
     tracks.append(contentsOf: more)
   }
 
+  // MARK: - Editing
+  //
+  // One rule governs all of these: **the active index keeps pointing at the
+  // same track**. Someone reordering a queue is not asking for the music to
+  // jump, and a player that changes what is playing because a row moved
+  // somewhere else in the list is broken in a way people notice immediately.
+  // Every index adjustment below exists to hold that still.
+
+  /// Insert before `index`. Clamped, so an out-of-range index appends rather
+  /// than throwing — a queue edit is not worth failing a call over.
+  public func insert(_ more: [Track], at index: Int) {
+    guard !more.isEmpty else { return }
+    let at = max(0, min(index, tracks.count))
+    tracks.insert(contentsOf: more, at: at)
+    if at <= activeIndex { activeIndex += more.count }
+  }
+
+  /**
+   Remove one item.
+
+   Removing the *playing* track is the interesting case, and the index stays
+   where it is: whatever followed slides into place, which is what "remove this
+   from the queue" means to someone looking at a list. The caller is left to
+   notice that `activeTrack` changed identity and restart playback — the queue
+   does not start or stop anything, here or anywhere else.
+   */
+  public func remove(at index: Int) {
+    guard tracks.indices.contains(index) else { return }
+    tracks.remove(at: index)
+    if index < activeIndex {
+      activeIndex -= 1
+    }
+    activeIndex = max(0, min(activeIndex, max(0, tracks.count - 1)))
+  }
+
+  public func move(from: Int, to: Int) {
+    guard tracks.indices.contains(from) else { return }
+    let destination = max(0, min(to, tracks.count - 1))
+    guard from != destination else { return }
+
+    let moving = tracks.remove(at: from)
+    tracks.insert(moving, at: destination)
+
+    // Three cases, and only the first is about the moved item itself.
+    if from == activeIndex {
+      activeIndex = destination
+    } else if from < activeIndex && destination >= activeIndex {
+      activeIndex -= 1
+    } else if from > activeIndex && destination <= activeIndex {
+      activeIndex += 1
+    }
+  }
+
+  public func clear() {
+    tracks = []
+    activeIndex = 0
+  }
+
   public var activeTrack: Track? {
     tracks.indices.contains(activeIndex) ? tracks[activeIndex] : nil
   }
 
+  /**
+   Which index plays after this one, honouring repeat.
+
+   Separate from `nextTrack` because the crossfade machinery needs to preload
+   whatever is coming, and under `.one` that is the track already playing —
+   a second reader on the same source, which is exactly what a repeat-one
+   crossfade is. Returning nil there instead would silently disable the fade
+   for the one case where the fade is most obvious.
+   */
+  public var nextIndex: Int? {
+    guard !tracks.isEmpty else { return nil }
+    switch repeatMode {
+    case .one:
+      return activeIndex
+    case .all:
+      return (activeIndex + 1) % tracks.count
+    case .off:
+      let next = activeIndex + 1
+      return tracks.indices.contains(next) ? next : nil
+    }
+  }
+
   public var nextTrack: Track? {
-    let next = activeIndex + 1
-    return tracks.indices.contains(next) ? tracks[next] : nil
+    guard let next = nextIndex, tracks.indices.contains(next) else { return nil }
+    return tracks[next]
   }
 
   /**

@@ -278,8 +278,10 @@ public final class PlaybackEngine {
     DispatchQueue.main.async { [weak self] in
       guard let self, !self.transitioning else { return }
       let listened = self.listenedSeconds()
-      let next = self.queue.activeIndex + 1
-      guard self.queue.tracks.indices.contains(next) else { self.finish(); return }
+      // Asks the queue rather than adding one, so repeat is honoured in the
+      // one place it has to be: `.one` returns the same index and the track
+      // starts again, `.all` wraps at the end instead of finishing.
+      guard let next = self.queue.nextIndex else { self.finish(); return }
       self.queue.set(self.queue.tracks, startIndex: next)
       try? self.beginTrack(at: next, fromFrame: 0, previousListenedSec: listened)
     }

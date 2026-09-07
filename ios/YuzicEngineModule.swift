@@ -79,6 +79,43 @@ public final class YuzicEngineModule: Module {
       self.engine?.queue.activeIndex ?? 0
     }
 
+    // Queue editing. Declared in `src/AudioEngine.ts` since the beginning and
+    // implemented by nothing until now, which is what was standing between the
+    // host and deleting its current player — yuzic edits its queue through
+    // every one of these.
+    //
+    // None of them touch playback. Editing a list and changing what is playing
+    // are different actions, and the queue's own index adjustments exist to
+    // keep the second from happening as a side effect of the first.
+
+    AsyncFunction("insertAt") { (index: Int, tracks: [TrackRecord]) in
+      self.engine?.queue.insert(tracks.map(\.asTrack), at: index)
+      self.sendEvent("onQueueChange", [:])
+    }
+
+    AsyncFunction("removeAt") { (index: Int) in
+      self.engine?.queue.remove(at: index)
+      self.sendEvent("onQueueChange", [:])
+    }
+
+    AsyncFunction("move") { (fromIndex: Int, toIndex: Int) in
+      self.engine?.queue.move(from: fromIndex, to: toIndex)
+      self.sendEvent("onQueueChange", [:])
+    }
+
+    AsyncFunction("clearQueue") {
+      self.engine?.queue.clear()
+      self.sendEvent("onQueueChange", [:])
+    }
+
+    AsyncFunction("getQueue") { () -> [[String: Any]] in
+      (self.engine?.queue.tracks ?? []).map(\.asRecordDictionary)
+    }
+
+    AsyncFunction("setRepeatMode") { (mode: String) in
+      self.engine?.queue.repeatMode = RepeatMode(rawValue: mode) ?? .off
+    }
+
     // MARK: transport
 
     AsyncFunction("getState") { () -> String in
@@ -294,6 +331,35 @@ struct CrossfadeRecord: Record {
   @Field var skipIsImmediate: Bool = true
 }
 
+
+// MARK: - Domain → bridge
+//
+// Only `getQueue` needs this direction: everything else the host learns comes
+// through an event, and events carry figures rather than tracks. Hand-built
+// rather than made `Codable`, so that the keys here and the `Track` fields in
+// src/types.ts are visibly the same list and drift is a visible diff.
+
+extension Track {
+  var asRecordDictionary: [String: Any] {
+    var out: [String: Any] = [
+      "id": id,
+      "uri": uri,
+      "title": title,
+      "followsPrevious": followsPrevious,
+      "continuous": continuous,
+    ]
+    // Absent rather than null: `durationSec` missing means the host never knew,
+    // and a JSON null would arrive as 0 and be believed.
+    if let artist { out["artist"] = artist }
+    if let album { out["album"] = album }
+    if let artworkUri { out["artworkUri"] = artworkUri }
+    if let durationSec { out["durationSec"] = durationSec }
+    if !headers.isEmpty { out["headers"] = headers }
+    if let replayGainDb { out["replayGainDb"] = replayGainDb }
+    if let replayGainPeak { out["replayGainPeak"] = replayGainPeak }
+    return out
+  }
+}
 
 // MARK: - Bridge → domain
 //
