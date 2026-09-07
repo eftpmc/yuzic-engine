@@ -69,6 +69,44 @@ public final class PlaybackEngine {
    */
   private var openToken: Int = 0
 
+  /**
+   A reader for the next track, opened before anything asks for it.
+
+   A skip that has to fetch is a skip that waits, and on cellular a lossless
+   track costs seconds to open — long enough that the button reads as broken.
+   The crossfade already opens the next track ahead of time; this is the same
+   idea without waiting for the fade.
+
+   Held with the id it was opened for and checked against the id actually
+   wanted, so a queue edit cannot make this hand back the wrong track. A stale
+   entry is simply not used, and the cost of being wrong is a wasted fetch.
+   */
+  private var preparedNext: (id: MediaId, reader: TrackReader)?
+
+  /// Whether the next track is open and waiting. Internal so a test can wait
+  /// for the preload to *land* rather than for its fetch to start — the two
+  /// are a round trip apart, and confusing them makes a flaky test.
+  var isNextPreloaded: Bool { preparedNext != nil }
+  private var preloading = false
+
+  /**
+   How far ahead the current track must be decoded before the next one is
+   fetched.
+
+   Two seconds, because that is what a healthy stream actually achieves here:
+   `targetBuffersAhead` schedules four half-second buffers, and measurement
+   puts a comfortable track at about 2.2s ahead. It is a health check, not a
+   reservoir — `bufferedFramesAhead` reports the read window, so a larger
+   figure is not merely conservative, it is unreachable and would mean never
+   preloading at all.
+
+   The point of gating on it: a connection that cannot keep two seconds ahead
+   of one track has no business being asked to fetch a second one. On a link
+   that is dropping reads this collapses toward zero and no preload happens,
+   which is the desired answer.
+   */
+  public static let preloadAfterBufferedSec: Double = 2
+
   private var activeReader: TrackReader?
 
   private var ticker: Timer?
@@ -562,6 +600,49 @@ public final class PlaybackEngine {
     }
   }
 
+  /**
+   Open the next track before anything asks for it.
+
+   Deliberately not routed through `openReader`: that carries the token which
+   supersedes an in-flight open, and a preload must neither cancel a skip nor
+   be cancelled by one. Best-effort — a failure is silent, because nothing is
+   waiting on it and the real open will report for itself.
+   */
+  private func preloadNextIfIdle(bufferedAheadSec: Double, remainingSec: Double) {
+    guard preparedNext == nil, !preloading, !transitioning, state == .playing else { return }
+    // Or everything that is left, whichever is less. A flat threshold never
+    // fires on a track shorter than it — which is exactly the interlude a
+    // listener is most likely to skip out of.
+    let enough = remainingSec > 0
+      ? min(Self.preloadAfterBufferedSec, remainingSec)
+      : Self.preloadAfterBufferedSec
+    guard bufferedAheadSec >= enough else { return }
+    guard let next = queue.nextTrack else { return }
+
+    preloading = true
+    let factory = self.factory
+    openQueue.async {
+      let opened: TrackReader? = {
+        do {
+          let reader = try factory.makeReader(for: next)
+          try reader.open()
+          return reader
+        } catch {
+          return nil
+        }
+      }()
+      DispatchQueue.main.async { [weak self] in
+        guard let self else { return }
+        self.preloading = false
+        // Checked again on arrival: the queue may have moved while this was in
+        // flight, and handing back a reader for a track that is no longer next
+        // is how a skip plays the wrong thing.
+        guard let opened, self.queue.nextTrack?.id == next.id else { return }
+        self.preparedNext = (next.id, opened)
+      }
+    }
+  }
+
   // MARK: - Moving between tracks
 
   /**
@@ -607,6 +688,22 @@ public final class PlaybackEngine {
     state = .buffering
     emit(.trackChanged(index: index, id: track.id, previousListenedSec: listened))
     publishNowPlaying()
+
+    // Already open? Then this is instant, which is the whole point of
+    // preloading: most skips go to the next track, and the next track is the
+    // one that was fetched ahead.
+    if let prepared = preparedNext, prepared.id == track.id {
+      preparedNext = nil
+      graph.cut(graph.activeVoice, to: 0)
+      activePlayback?.stop()
+      do {
+        try beginTrack(at: index, fromFrame: 0, prepared: prepared.reader, announced: true)
+      } catch {
+        state = .paused
+        emit(.failed("Could not play \(track.title): \(error)"))
+      }
+      return
+    }
 
     // The outgoing track stops now. Keeping it audible until the replacement
     // was ready avoided dead air, but it also meant pressing skip and hearing
@@ -702,6 +799,11 @@ public final class PlaybackEngine {
     // `announced` means the caller already said so — a skip announces the
     // moment the button is pressed rather than when the network answers, and
     // saying it twice would have a host scrobble or redraw for one skip twice.
+    // Whatever was preloaded was the *previous* track's successor. Dropping a
+    // stale one lets the preloader fetch what is next now, rather than pinning
+    // a reader nothing will ask for.
+    if preparedNext?.id != queue.nextTrack?.id { preparedNext = nil }
+
     if !announced {
       emit(.trackChanged(index: index, id: track.id, previousListenedSec: previousListenedSec))
     }
@@ -862,6 +964,8 @@ public final class PlaybackEngine {
     ) {
       publishNowPlaying()
     }
+
+    preloadNextIfIdle(bufferedAheadSec: buffered - position, remainingSec: duration - position)
 
     guard !transitioning else { return }
     let fade = queue.transitionDuration(userInitiated: false)

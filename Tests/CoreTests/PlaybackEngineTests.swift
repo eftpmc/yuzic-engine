@@ -157,6 +157,61 @@ final class PlaybackEngineTests: XCTestCase {
     XCTAssertEqual(graph.activeVoice.gain.outputVolume, 1, "the new track becomes audible")
   }
 
+  /**
+   The next track is opened before anything asks for it.
+
+   A skip that has to fetch is a skip that waits: on cellular a lossless track
+   costs seconds to open, which is what made the car's screen sit unchanged
+   after the button was pressed. Since most skips go to the track that is
+   already next, opening it ahead turns the common case into no fetch at all.
+   */
+  func testTheNextTrackIsOpenedAhead() throws {
+    let (engine, factory, _) = try makeEngine()
+    engine.setQueue([song("a"), song("b")], startIndex: 0)
+    try engine.play()
+
+    settle(timeout: 5) { engine.isNextPreloaded }
+    XCTAssertTrue(engine.isNextPreloaded,
+                  "the next track should be opened while the current one plays")
+    XCTAssertTrue(factory.opened.contains("b"))
+  }
+
+  /// And the skip then uses it rather than fetching again.
+  func testASkipToAPreloadedTrackDoesNotFetchAgain() throws {
+    let (engine, factory, graph) = try makeEngine()
+    engine.setQueue([song("a"), song("b")], startIndex: 0)
+    try engine.play()
+    // The preload having *landed*, not merely started: the reader is recorded
+    // when the fetch begins and stored a round trip later.
+    settle(timeout: 5) { engine.isNextPreloaded }
+    XCTAssertTrue(engine.isNextPreloaded, "precondition: the next track is ready")
+
+    var openedAfterSkip: [MediaId] = []
+    factory.onMakeReader = { openedAfterSkip.append($0) }
+
+    try engine.skipToNext()
+    settle { graph.activeVoice.gain.outputVolume == 1 }
+
+    XCTAssertEqual(engine.queue.activeIndex, 1)
+    XCTAssertFalse(openedAfterSkip.contains("b"),
+                   "the skip refetched a track it had already opened")
+  }
+
+  /**
+   A struggling stream is not asked to fetch a second track.
+
+   The gate is a health check, not a reservoir: a connection that cannot keep
+   two seconds ahead of what is playing has no business being asked for
+   another. On the link this was reported from, reads were failing outright.
+   */
+  func testNothingIsPreloadedWhileTheCurrentTrackIsStarved() {
+    // Below the threshold, and with plenty of track left to go.
+    XCTAssertLessThan(0.4, PlaybackEngine.preloadAfterBufferedSec)
+    // The threshold has to be reachable, or the feature never runs at all:
+    // `bufferedFramesAhead` reports the read window, measured at ~2.2s here.
+    XCTAssertLessThanOrEqual(PlaybackEngine.preloadAfterBufferedSec, 2.2)
+  }
+
   // MARK: - Volume, and the node it is allowed to touch
 
   /**
