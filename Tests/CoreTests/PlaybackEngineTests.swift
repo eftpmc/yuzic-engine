@@ -194,6 +194,71 @@ final class PlaybackEngineTests: XCTestCase {
     XCTAssertGreaterThan(listened ?? 0, 0.1)
   }
 
+  /**
+   Paused time is not listened time.
+
+   `previousListenedSec` is what a host judges a scrobble threshold against —
+   "half the track, or four minutes" — so counting the pause submits a play to
+   Last.fm and ListenBrainz for music nobody heard. A track paused overnight
+   and skipped in the morning would clear any threshold there is.
+
+   The clock is injected rather than slept through, so the pause here is an
+   hour long and the test still takes no time. Sleeping would only have let me
+   test a pause of a few hundred milliseconds, which is precisely the size of
+   pause that does not matter.
+   */
+  func testAPauseDoesNotCountAsListening() throws {
+    var clock = Date(timeIntervalSince1970: 1_000_000)
+    let fixture = try EncodedFixture.wav(seconds: 3)
+    let factory = FixtureFactory(data: fixture.data)
+    let graph = AudioGraph(sampleRate: 44_100)
+    try graph.startOffline(sampleRate: 44_100)
+    let engine = PlaybackEngine(graph: graph, factory: factory, now: { clock })
+
+    engine.setQueue([song("a"), song("b")], startIndex: 0)
+
+    var listened: Double?
+    engine.onEvent = {
+      if case .trackChanged(_, _, let seconds) = $0, let seconds { listened = seconds }
+    }
+
+    try engine.play()
+    clock.addTimeInterval(30)      // listened
+    engine.pause()
+    clock.addTimeInterval(3600)    // did not listen
+    try engine.play()
+    clock.addTimeInterval(10)      // listened
+    try engine.skipToNext()
+
+    XCTAssertEqual(listened ?? 0, 40, accuracy: 0.001,
+                   "the hour spent paused was counted as listening")
+  }
+
+  /// Pausing twice must not bank the same stretch twice.
+  func testPausingAnAlreadyPausedTrackDoesNotDoubleCount() throws {
+    var clock = Date(timeIntervalSince1970: 1_000_000)
+    let fixture = try EncodedFixture.wav(seconds: 3)
+    let factory = FixtureFactory(data: fixture.data)
+    let graph = AudioGraph(sampleRate: 44_100)
+    try graph.startOffline(sampleRate: 44_100)
+    let engine = PlaybackEngine(graph: graph, factory: factory, now: { clock })
+
+    engine.setQueue([song("a"), song("b")], startIndex: 0)
+    var listened: Double?
+    engine.onEvent = {
+      if case .trackChanged(_, _, let seconds) = $0, let seconds { listened = seconds }
+    }
+
+    try engine.play()
+    clock.addTimeInterval(20)
+    engine.pause()
+    clock.addTimeInterval(5)
+    engine.pause()
+    try engine.skipToNext()
+
+    XCTAssertEqual(listened ?? 0, 20, accuracy: 0.001)
+  }
+
   func testPauseAndResumeDoNotReopenTheTrack() throws {
     let (engine, factory, _) = try makeEngine()
     engine.setQueue([song("a")], startIndex: 0)

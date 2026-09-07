@@ -50,7 +50,24 @@ public final class PlaybackEngine {
 
   private var ticker: Timer?
   private var transitioning = false
-  private var trackStartedAt: Date?
+
+  /**
+   How long the current track has actually been playing.
+
+   Two values rather than one start date, because a start date measures wall
+   clock and a paused player is not listening. A track left paused overnight
+   would report the whole night as listened, and `previousListenedSec` is what
+   scrobble thresholds are judged against — so the wrong number here submits
+   plays to Last.fm and ListenBrainz for music nobody heard.
+
+   `listenedAccumulated` holds the stretches already played;
+   `listeningSince` marks the open one and is nil while paused.
+   */
+  private var listenedAccumulated: TimeInterval = 0
+  private var listeningSince: Date?
+
+  /// Injectable so the listened-time tests do not have to sleep.
+  private let now: () -> Date
 
   private(set) public var state: PlaybackState = .idle {
     didSet { if state != oldValue { emit(.stateChanged(state)) } }
@@ -76,11 +93,13 @@ public final class PlaybackEngine {
   public init(
     graph: AudioGraph,
     factory: TrackReaderFactory,
-    nowPlaying: NowPlayingCenter = NowPlayingCenter()
+    nowPlaying: NowPlayingCenter = NowPlayingCenter(),
+    now: @escaping () -> Date = Date.init
   ) {
     self.graph = graph
     self.factory = factory
     self.nowPlaying = nowPlaying
+    self.now = now
     wireRemoteCommands()
   }
 
@@ -181,6 +200,10 @@ public final class PlaybackEngine {
         graph.cut(graph.activeVoice, to: 1)
       }
       activePlayback?.resume()
+      // Reopen the listening stretch the pause closed. Guarded so that calling
+      // play() on an already-playing engine does not discard the open stretch
+      // and restart it, which would quietly reset the count to zero.
+      if listeningSince == nil { listeningSince = now() }
       state = .playing
       publishNowPlaying()
       startTicking()
@@ -190,9 +213,18 @@ public final class PlaybackEngine {
   public func pause() {
     activePlayback?.pause()
     incomingPlayback?.pause()
+    closeListeningStretch()
     state = .paused
     publishNowPlaying()
     stopTicking()
+  }
+
+  /// Bank the stretch that has just ended. Idempotent, because pausing an
+  /// already-paused player must not bank the same seconds twice.
+  private func closeListeningStretch() {
+    guard let since = listeningSince else { return }
+    listenedAccumulated += now().timeIntervalSince(since)
+    listeningSince = nil
   }
 
   public func stop() {
@@ -280,7 +312,8 @@ public final class PlaybackEngine {
     graph.setTrackGain(graph.activeVoice, to: ReplayGain.linearGain(for: track, settings: replayGain))
     graph.cut(graph.activeVoice, to: 1)
     try playback.start(atFrame: frame)
-    trackStartedAt = Date()
+    listenedAccumulated = 0
+    listeningSince = now()
 
     state = .playing
     emit(.trackChanged(index: index, id: track.id, previousListenedSec: previousListenedSec))
@@ -392,7 +425,11 @@ public final class PlaybackEngine {
         self.activePlayback = incoming
         self.activeReader = reader
         self.queue.set(self.queue.tracks, startIndex: self.queue.activeIndex + 1)
-        self.trackStartedAt = Date().addingTimeInterval(-duration / 2)
+        // The incoming track has been audible since the fade began, half a
+        // fade ago, so it starts with that much already listened rather than
+        // from zero.
+        self.listenedAccumulated = duration / 2
+        self.listeningSince = self.now()
         self.transitioning = false
         self.emit(.trackChanged(index: self.queue.activeIndex, id: next.id,
                                 previousListenedSec: listened))
@@ -414,10 +451,12 @@ public final class PlaybackEngine {
 
   // MARK: - Bookkeeping
 
-  /// Played time for the outgoing track, fade included. See `Event.trackChanged`.
+  /// Played time for the outgoing track, fade included, pauses excluded.
+  /// See `Event.trackChanged`.
   private func listenedSeconds() -> Double? {
-    guard let startedAt = trackStartedAt else { return nil }
-    return Date().timeIntervalSince(startedAt)
+    guard listeningSince != nil || listenedAccumulated > 0 else { return nil }
+    let open = listeningSince.map { now().timeIntervalSince($0) } ?? 0
+    return listenedAccumulated + open
   }
 
   private func finish() {
