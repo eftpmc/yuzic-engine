@@ -106,17 +106,22 @@ export interface AudioEngine {
 
   // ── cache ────────────────────────────────────────────────────────────────
   //
-  // NOT IMPLEMENTED YET on iOS. (`Progress.bufferedSec` is implemented and
-  // reported; what is missing is a cache that outlives a track.) Caching today is per-track and in memory: a
-  // `CachedByteSource` holds the ranges it has fetched for as long as the track
-  // is playing, and they go when it does. There is no disk cache for these to
-  // configure, measure or evict from, so calling them throws rather than
-  // quietly doing nothing.
+  // Implemented on iOS. Audio is kept on disk between tracks and between
+  // launches, keyed by `MediaId` rather than by URL — stream URLs carry tokens
+  // that rotate, so a URL key would miss every session and fill the cache with
+  // duplicates of one album.
   //
-  // Left declared deliberately — the shape is settled and yuzic needs `evict`
-  // when a download is deleted — but a documented method that silently does
-  // nothing is worse than an absent one, because nobody files a bug against a
-  // feature they believe is working.
+  // Entries are sparse: a track played halfway is kept halfway, and a later
+  // play resumes from whatever arrived rather than starting again. Eviction is
+  // least-recently-used and takes whole entries, because a track with its
+  // middle dropped still costs a request per gap.
+  //
+  // Only directly-streamed audio is cached. A transcoded stream is generated
+  // per request and its bytes are not the file, so two plays at different
+  // bitrates would be different audio under one id.
+  //
+  // NOT IMPLEMENTED on Android, where Media3 keeps its own cache — these four
+  // are no-ops there until that is joined up.
 
   configureCache(options: CacheOptions): Promise<void>;
   clearCache(): Promise<void>;

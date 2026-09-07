@@ -63,8 +63,9 @@ next; read the queue, the active item and its index.
 **Sources**
 - Local files (`file://`) for offline downloads.
 - HTTP streaming where the URL carries auth in query params or headers.
-- An on-device LRU cache, currently 1GB with a 2-item preload window, that can
-  be cleared on demand.
+- An on-device LRU cache, 1GB by default, cleared and measured on demand.
+  Built: sparse entries keyed by `MediaId`, surviving relaunch, evicted
+  least-recently-used. iOS only so far.
 
 **Sleep timer** — stop after a duration, cancellable.
 
@@ -112,10 +113,20 @@ Reasoning for each is in [docs/architecture.md](docs/architecture.md).
   index did not follow the player's; and replay gain had no channel to be
   applied through.
 
-  The next real gate is not more surface, it is **events**. `onProgress`,
-  `onStateChange` and `onTrackChange` are declared and nothing emits them —
-  only `onRemoteCommand` is wired. A host on Android can ask where it is but
-  will never be told.
+  Events are written now — `onProgress`, `onStateChange` and `onTrackChange`
+  were declared and emitted by nothing — but written is not run. Android is
+  also behind on the newest work: queue editing, repeat, speed and the disk
+  cache are iOS only, and its four cache calls are no-ops because Media3 keeps
+  a cache of its own that has not been joined up.
+
+## What still stands between this and replacing the player
+
+Measured against every `TrackPlayer.*` call yuzic actually makes. On iOS, one:
+
+- **Gapless detection**, below. Everything else yuzic calls, the engine now
+  answers — queue editing, repeat, speed and the cache were the last of it.
+
+On Android, the list is the one above: none of it has run.
 - ~~**Seek cost, measured.**~~ Answered, for both transports: seeking from 4.4s
   to 151.4s with only 11.1s buffered, against a real Navidrome over the open
   internet — **273ms** on a direct ranged stream, **333ms** on a transcoded one
