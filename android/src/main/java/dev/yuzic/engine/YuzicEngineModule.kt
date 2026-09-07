@@ -402,13 +402,16 @@ class YuzicEngineModule : Module() {
    */
   private val sleepTimer = SleepTimer { fadeSeconds ->
     val graph = PlaybackService.graph ?: return@SleepTimer
-    graph.ramp(graph.activeVoice, 0f, fadeSeconds)
+    // Linear, explicitly: this is one voice going to silence with nothing to
+    // sum against, so equal power would hold it near full volume for half the
+    // fade and then drop it. Sleep is the case that curve is worst for.
+    graph.ramp(graph.activeVoice, 0f, fadeSeconds, AudioGraph.FadeCurve.LINEAR)
     main.postDelayed({
       graph.activeVoice.player.pause()
       // Put the fade back where it was found. Without this, pressing play the
       // next morning starts a track at zero gain and looks like a dead player
       // — the same bug the iOS engine calls out at PlaybackEngine.swift:163.
-      graph.ramp(graph.activeVoice, 1f, 0.0)
+      graph.ramp(graph.activeVoice, 1f, 0.0, AudioGraph.FadeCurve.LINEAR)
     }, (fadeSeconds * 1000).toLong())
   }
 

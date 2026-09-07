@@ -231,15 +231,70 @@ class AudioGraph(private val context: Context, private val httpClient: OkHttpCli
    * timers, and a fade that stutters because the main looper was asleep is worse
    * than no fade. Counting frames cannot be throttled.
    */
-  fun ramp(voice: Voice, target: Float, durationSec: Double) {
+  fun ramp(voice: Voice, target: Float, durationSec: Double, curve: FadeCurve) {
     if (durationSec <= 0.0) {
       voice.fade.setGainImmediately(target)
     } else {
-      voice.fade.rampTo(target, durationSec)
+      voice.fade.rampTo(target, durationSec, curve)
     }
   }
 
+  /**
+   * The shape a fade follows. Chosen per call, because the right answer differs.
+   *
+   * There is deliberately no default. A fade between two sources and a fade of
+   * one source to silence want opposite curves, and making either the default
+   * makes the other caller quietly wrong — which is exactly what happened on
+   * iOS, where the sleep timer silently inherited the crossfade's curve.
+   */
+  enum class FadeCurve {
+    /**
+     * Two uncorrelated sources overlapping. `rising² + falling² == 1` at every
+     * point, so the pair sums to constant power and the crossover does not dip.
+     * Linear ramps here sum to about 0.5 amplitude in the middle, which is
+     * audibly a hole.
+     *
+     * Safe on this platform for a reason worth writing down, because the
+     * comment that used to sit in [FadeAudioProcessor] argued the opposite:
+     * equal power cannot clip here, since each voice owns a separate
+     * `DefaultAudioSink` and the two never sum inside a processor. They meet in
+     * the system mixer, which has its own headroom.
+     */
+    EQUAL_POWER,
+
+    /**
+     * One source going somewhere on its own. Nothing sums with it, so constant
+     * power is meaningless — and equal power is actively wrong here: its
+     * fade-out is still at 0.707 halfway through, holding almost full volume
+     * and then collapsing. For the sleep timer that is "still loud, still loud,
+     * gone" rather than a fade to sleep.
+     */
+    LINEAR,
+  }
+
   companion object {
+    /**
+     * The gain a fade should be at, a fraction `position` of the way through.
+     *
+     * Pure, and separated out for the same reason as its Swift counterpart: the
+     * curve is the part worth testing while the rest is a clock. It is also the
+     * part that was wrong once — the iOS falling branch read
+     * `1 - sqrt(1 - (1 - position))`, whose inner `1 - (1 - position)` collapses
+     * to `position`, inverting the fade-out so the outgoing track rose from
+     * silence and was cut off at full volume. Kept identical to
+     * `AudioGraph.fadeVolume` in `ios/Core/AudioGraph.swift`, so a change to one
+     * reads as an omission in the other.
+     */
+    fun fadeVolume(start: Float, target: Float, position: Float, curve: FadeCurve): Float {
+      val p = position.coerceIn(0f, 1f)
+      return when (curve) {
+        FadeCurve.EQUAL_POWER ->
+          if (target > start) start + (target - start) * kotlin.math.sqrt(p)
+          else target + (start - target) * kotlin.math.sqrt(1f - p)
+        FadeCurve.LINEAR -> start + (target - start) * p
+      }
+    }
+
     /**
      * The rate the graph is *expected* to run at in `fixed` mode.
      *
@@ -468,6 +523,7 @@ class FadeAudioProcessor : BaseAudioProcessor() {
   // lock on the audio thread is a dropout waiting to happen.
   @Volatile private var requestedGain = 1f
   @Volatile private var requestedSeconds = 0.0
+  @Volatile private var requestedCurve = AudioGraph.FadeCurve.LINEAR
 
   // Audio-thread only, from here down.
   private var currentGain = 1f
@@ -475,14 +531,16 @@ class FadeAudioProcessor : BaseAudioProcessor() {
   private var pendingTarget = 1f
   private var framesIntoRamp = 0L
   private var rampFrames = 0L
+  private var rampCurve = AudioGraph.FadeCurve.LINEAR
 
   fun setGainImmediately(gain: Float) {
     requestedSeconds = 0.0
     requestedGain = gain
   }
 
-  fun rampTo(target: Float, durationSec: Double) {
+  fun rampTo(target: Float, durationSec: Double, curve: AudioGraph.FadeCurve) {
     requestedSeconds = durationSec
+    requestedCurve = curve
     requestedGain = target
   }
 
@@ -509,6 +567,7 @@ class FadeAudioProcessor : BaseAudioProcessor() {
       pendingTarget = target
       startGain = currentGain
       framesIntoRamp = 0
+      rampCurve = requestedCurve
       rampFrames = (requestedSeconds * inputAudioFormat.sampleRate).toLong()
       if (rampFrames == 0L) currentGain = target
     }
@@ -529,11 +588,12 @@ class FadeAudioProcessor : BaseAudioProcessor() {
     while (input.hasRemaining()) {
       if (channel == 0 && rampFrames > 0) {
         val progress = (framesIntoRamp.toDouble() / rampFrames).coerceIn(0.0, 1.0)
-        // Linear in amplitude. Equal-power would hold the perceived loudness
-        // flatter across the overlap, but it sums above unity in the middle,
-        // which clips exactly when two tracks are loudest together. Linear is
-        // the quieter, safer half-second.
-        currentGain = (startGain + (pendingTarget - startGain) * progress).toFloat()
+        // The shape is the caller's choice — see [AudioGraph.FadeCurve]. This
+        // used to be linear unconditionally, on the grounds that equal power
+        // "sums above unity in the middle, which clips": not so here, because
+        // each voice has its own audio sink and the two never sum inside a
+        // processor.
+        currentGain = AudioGraph.fadeVolume(startGain, pendingTarget, progress.toFloat(), rampCurve)
         if (framesIntoRamp >= rampFrames) {
           currentGain = pendingTarget
           rampFrames = 0
