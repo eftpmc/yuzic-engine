@@ -44,6 +44,47 @@ final class AudioGraphTests: XCTestCase {
     return buffer
   }
 
+  /**
+   Which voice a reconnect lands on.
+
+   This is the assertion that would have caught a real bug: the direct-play
+   path called `reconnectIdleVoice` and then started the track on the *active*
+   voice, so the file's rate was applied to the one node that was not about to
+   be used. It is silent — the mixer resamples, so it sounds perfectly correct
+   — and shows up only as a wrong number, because `playerTime.sampleTime` then
+   counts in the connection's frames while the reader reports the file's. On a
+   44.1kHz track over a 48kHz connection the reported position runs 8.8% fast.
+
+   Checking the connection's rate rather than any audible property is therefore
+   the point, not a shortcut: audio is not what breaks.
+   */
+  func testReconnectTargetsTheVoiceItIsGiven() throws {
+    let graph = AudioGraph()
+    try graph.startOffline()
+
+    graph.reconnect(graph.activeVoice, toSourceRate: 44_100)
+
+    XCTAssertEqual(graph.activeVoice.player.outputFormat(forBus: 0).sampleRate, 44_100)
+    XCTAssertEqual(
+      graph.idleVoice.player.outputFormat(forBus: 0).sampleRate, AudioGraph.fixedSampleRate,
+      "reconnecting one voice must not disturb the other"
+    )
+  }
+
+  /// The crossfade path's variant, which really does want the idle voice —
+  /// pinned so that fixing the direct-play caller cannot quietly redirect it.
+  func testIdleReconnectLeavesTheActiveVoiceAlone() throws {
+    let graph = AudioGraph()
+    try graph.startOffline()
+
+    graph.reconnectIdleVoice(toSourceRate: 44_100)
+
+    XCTAssertEqual(graph.idleVoice.player.outputFormat(forBus: 0).sampleRate, 44_100)
+    XCTAssertEqual(
+      graph.activeVoice.player.outputFormat(forBus: 0).sampleRate, AudioGraph.fixedSampleRate
+    )
+  }
+
   func testAudioActuallyReachesTheOutput() throws {
     let graph = AudioGraph()
     try graph.startOffline()

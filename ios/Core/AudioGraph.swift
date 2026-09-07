@@ -143,19 +143,32 @@ public final class AudioGraph {
   }
 
   /**
-   Point the idle voice at a new source rate, ready for the track about to
-   start.
+   Point a voice at a new source rate, ready for the track about to start on it.
 
-   A connection's format cannot be changed while the engine is running, so this
-   only ever touches the voice that is *not* playing, during the preload window.
-   Reconnecting the live one would glitch, which is the whole reason the swap
-   happens on a pair rather than on a single node being reconfigured in place.
+   A connection's format cannot be changed while the engine is running, so the
+   caller must pass a voice that is not currently playing. Reconnecting a live
+   one would glitch, which is the whole reason the swap happens on a pair
+   rather than on a single node being reconfigured in place.
+
+   Getting this wrong is quiet rather than loud, which is why it takes the
+   voice explicitly instead of picking one. A player node connected at a rate
+   its file does not share still plays — resampled by the mixer, so it sounds
+   correct — but `playerTime.sampleTime` then advances in the *connection's*
+   frames while `AudioFileReader.sampleRate` reports the *file's*, and
+   `PlaybackEngine.progress` divides one by the other. A 44.1kHz track on a
+   48kHz connection reports its position 8.8% fast: the progress bar runs
+   ahead, the track appears to end early, and `shouldBeginTransition` starts
+   the crossfade before it should.
    */
-  public func reconnectIdleVoice(toSourceRate rate: Double) {
+  public func reconnect(_ voice: Voice, toSourceRate rate: Double) {
     guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2) else { return }
-    let voice = idleVoice
     engine.disconnectNodeOutput(voice.player)
     engine.connect(voice.player, to: voice.gain, format: format)
+  }
+
+  /// `reconnect`, for the preload window before a crossfade.
+  public func reconnectIdleVoice(toSourceRate rate: Double) {
+    reconnect(idleVoice, toSourceRate: rate)
   }
 
   // MARK: - Equalizer

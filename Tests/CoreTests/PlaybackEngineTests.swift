@@ -101,6 +101,35 @@ final class PlaybackEngineTests: XCTestCase {
     XCTAssertEqual(graph.activeVoice.gain.outputVolume, 1)
   }
 
+  /**
+   The play path reconnects the voice it actually plays on.
+
+   `makeEngine` builds graph and fixture both at 44.1kHz, so the two rates
+   agree and no mismatch can arise — which is exactly why every other test here
+   passed while the direct-play path was reconnecting the wrong voice. This one
+   pairs a 44.1kHz file with the 48kHz graph real hardware usually gives you.
+
+   The failure is silent: audio still comes out, resampled by the mixer, and
+   only the reported position is wrong — `playerTime.sampleTime` counts in the
+   connection's frames while `AudioFileReader.sampleRate` reports the file's,
+   so the playhead runs 8.8% fast and the crossfade starts early.
+   */
+  func testPlayingReconnectsTheVoiceItPlaysOn() throws {
+    let fixture = try EncodedFixture.wav(seconds: 3)
+    let factory = FixtureFactory(data: fixture.data)
+    let graph = AudioGraph(sampleRate: 48_000)
+    try graph.startOffline(sampleRate: 48_000)
+    let engine = PlaybackEngine(graph: graph, factory: factory)
+
+    engine.setQueue([song("a")], startIndex: 0)
+    try engine.play()
+
+    XCTAssertEqual(
+      graph.activeVoice.player.outputFormat(forBus: 0).sampleRate, 44_100,
+      "the playing voice must carry the file's rate, or its position is wrong"
+    )
+  }
+
   func testPlayingOpensTheTrackAtTheStartIndex() throws {
     let (engine, factory, _) = try makeEngine()
     engine.setQueue([song("a"), song("b"), song("c")], startIndex: 1)
