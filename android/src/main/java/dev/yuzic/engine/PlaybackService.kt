@@ -91,6 +91,24 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     var onSkipToPrevious: (() -> Unit)? = null
 
+    /**
+     * Ask the session to re-read `getAvailableCommands`.
+     *
+     * Needed because the command set now depends on the *queue*, which the
+     * player knows nothing about. ExoPlayer announces its own commands when its
+     * timeline changes; ours can change when nothing about the player does — an
+     * `append` behind the last track turns "next" from impossible into
+     * possible, and the player has no reason to mention it.
+     *
+     * Observed before this existed: after appending, "next" stayed greyed
+     * indefinitely on one run and lit within four seconds on another, the
+     * difference being whether some unrelated player event happened along to
+     * trigger a re-read. Intermittent is worse than broken — a user gets a
+     * working button sometimes, with no pattern they can see.
+     */
+    @Volatile
+    var onCommandsMayHaveChanged: (() -> Unit)? = null
+
     private const val BROWSE_ROOT_ID = "yuzic:root"
 
     /**
@@ -159,7 +177,11 @@ class PlaybackService : MediaLibraryService() {
     // and a shared handle brings its own hazard of one instance releasing
     // another's live session.
     if (session == null) {
-      session = MediaLibrarySession.Builder(this, EnginePlayer(graph), LibraryCallback())
+      val enginePlayer = EnginePlayer(graph)
+      // The queue decides part of the command set, so the module needs a way to
+      // say "ask again" when it changes something the player cannot see.
+      onCommandsMayHaveChanged = { enginePlayer.notifyAvailableCommandsChanged() }
+      session = MediaLibrarySession.Builder(this, enginePlayer, LibraryCallback())
         .setId(SESSION_ID)
         .build()
     }
@@ -181,6 +203,7 @@ class PlaybackService : MediaLibraryService() {
   }
 
   override fun onDestroy() {
+    onCommandsMayHaveChanged = null
     session?.run {
       player.release()
       release()
@@ -449,7 +472,25 @@ private class EnginePlayer(private val graph: AudioGraph) :
       .addIf(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM, PlaybackService.queue.activeIndex > 0)
       .build()
 
+  /**
+   * The listeners this player has been given, kept as well as forwarded.
+   *
+   * `ForwardingPlayer` hands registration straight to the wrapped player and
+   * keeps no record, which is fine until something other than the player needs
+   * to raise an event — here, a command set that depends on the queue. Media3's
+   * session registers through this method like any other listener, so calling
+   * it back directly is enough to make it re-read.
+   */
+  private val listeners = java.util.concurrent.CopyOnWriteArraySet<Player.Listener>()
+
+  /** Main thread only, like every other player callback. */
+  fun notifyAvailableCommandsChanged() {
+    val commands = availableCommands
+    listeners.forEach { it.onAvailableCommandsChanged(commands) }
+  }
+
   override fun addListener(listener: Player.Listener) {
+    listeners.add(listener)
     // Both, because the session must keep hearing about state after a swap. The
     // alternative — re-registering on every crossover — races the swap and
     // loses the first event after it.
@@ -458,6 +499,7 @@ private class EnginePlayer(private val graph: AudioGraph) :
   }
 
   override fun removeListener(listener: Player.Listener) {
+    listeners.remove(listener)
     graph.voiceA.player.removeListener(listener)
     graph.voiceB.player.removeListener(listener)
   }

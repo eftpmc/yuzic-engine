@@ -95,6 +95,9 @@ class YuzicEngineModule : Module() {
       tracks.forEach { TrackHeaders.register(it.uri, it.headers) }
       // No player call. The voice holds only the track being played, so
       // appending changes what happens *next* and nothing that is happening.
+      // Which is exactly why the session has to be told: "next" may have gone
+      // from impossible to possible and nothing else will mention it.
+      commandsMayHaveChanged()
       sendEvent("onQueueChange", emptyMap<String, Any?>())
     }
 
@@ -115,6 +118,7 @@ class YuzicEngineModule : Module() {
         val at = index.coerceIn(0, queue.tracks.size)
         queue.insert(tracks, at)
         tracks.forEach { TrackHeaders.register(it.uri, it.headers) }
+        commandsMayHaveChanged()
         sendEvent("onQueueChange", emptyMap<String, Any?>())
       }
     }
@@ -122,6 +126,7 @@ class YuzicEngineModule : Module() {
     AsyncFunction("removeAt") { index: Int ->
       if (index in queue.tracks.indices) {
         queue.remove(index)
+        commandsMayHaveChanged()
         sendEvent("onQueueChange", emptyMap<String, Any?>())
       }
     }
@@ -131,7 +136,8 @@ class YuzicEngineModule : Module() {
         val destination = to.coerceIn(0, queue.tracks.size - 1)
         if (from != destination) {
           queue.move(from, destination)
-          sendEvent("onQueueChange", emptyMap<String, Any?>())
+          commandsMayHaveChanged()
+        sendEvent("onQueueChange", emptyMap<String, Any?>())
         }
       }
     }
@@ -141,6 +147,7 @@ class YuzicEngineModule : Module() {
       cancelTransition()
       onMain { PlaybackService.graph?.activeVoice?.player?.clearMediaItems() }
       TrackHeaders.clear()
+      commandsMayHaveChanged()
       sendEvent("onQueueChange", emptyMap<String, Any?>())
     }
 
@@ -167,6 +174,8 @@ class YuzicEngineModule : Module() {
           graph.voiceB.player.repeatMode = media3
         }
       }
+      // `all` gives the last track a next and `off` takes it away again.
+      commandsMayHaveChanged()
     }
 
     // MARK: transport
@@ -749,6 +758,18 @@ class YuzicEngineModule : Module() {
    * behind makes the change lurch halfway through the fade. Each for its own
    * track, because the two rarely share a gain. Main thread only.
    */
+  /**
+   * Tell the session the command set may have moved.
+   *
+   * Called after any queue change that does not touch the player, because those
+   * are exactly the ones nothing else will announce. Cheap, idempotent, and
+   * safe to over-call: it re-reads a set and hands it to listeners that compare
+   * before acting.
+   */
+  private fun commandsMayHaveChanged() = onMain {
+    PlaybackService.onCommandsMayHaveChanged?.invoke()
+  }
+
   private fun applyVolume() {
     val graph = PlaybackService.graph ?: return
     applyVolumeTo(graph.activeVoice, queue.activeTrack)
