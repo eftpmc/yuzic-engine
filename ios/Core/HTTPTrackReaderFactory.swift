@@ -30,13 +30,22 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
    reported as 8 MB, which the parser read as a 58-second track, cutting it
    short and starting a twelve-second crossfade at 46 seconds.
 
-   Set above lossless so the same mistake cannot be made by a format rather
-   than a bitrate. Over-reporting is now free: nothing derives a *duration*
-   from this any more — see `PlaybackEngine.referenceDuration`, which trusts
-   the host's metadata — so this number only has to be large enough that the
-   parser keeps reading until the bytes genuinely run out.
+   Set above *uncompressed* hi-res so the same mistake cannot be made by a
+   format rather than a bitrate. The ceiling that matters is 24-bit/192kHz
+   stereo at 9.22 Mbps uncompressed — a FLAC of it runs about 5.5 — and this
+   sits comfortably past it. Anything below is covered by a wide margin:
+
+       16/44.1 stereo   1.41 Mbps uncompressed
+       24/96  stereo    4.61
+       24/192 stereo    9.22
+
+   Over-reporting is free: nothing derives a *duration* from this any more —
+   see `PlaybackEngine.referenceDuration`, which trusts the host's metadata —
+   so it only has to be large enough that the parser keeps reading until the
+   bytes genuinely run out. Under-reporting truncates the track, which is the
+   fault this constant caused when it was 320 kbps, so the margin is the point.
    */
-  public static let assumedBitrate: Double = 5_000_000
+  public static let assumedBitrate: Double = 20_000_000
 
   /**
    Where fetched audio is kept between tracks. Nil keeps the old behaviour —

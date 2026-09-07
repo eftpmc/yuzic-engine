@@ -48,6 +48,26 @@ public final class PlaybackEngine {
   private var incomingPlayback: TrackPlayback?
   /// What the idle voice is carrying during a crossfade, so volume can reach it.
   private var incomingTrack: Track?
+
+  /**
+   Where readers are opened.
+
+   `open()` is a network round trip for a remote track, and everything that
+   drives this engine is on the main thread: the ticker is scheduled on
+   `RunLoop.main` and the lock-screen and car handlers arrive there too. Opening
+   inline froze the interface for the length of a fetch — on every skip, and at
+   the start of every crossfade.
+   */
+  private let openQueue = DispatchQueue(label: "dev.yuzic.engine.open", qos: .userInitiated)
+
+  /**
+   Invalidates an open that has been overtaken.
+
+   A second skip, or a skip during a crossfade's open, must not be followed by
+   the first one's reader arriving late and taking over the graph. Every open
+   carries the token it started with and is dropped if it no longer matches.
+   */
+  private var openToken: Int = 0
   private var activeReader: TrackReader?
 
   private var ticker: Timer?
@@ -518,6 +538,32 @@ public final class PlaybackEngine {
 
   // MARK: - Moving between tracks
 
+  /**
+   Open a reader off the main thread and continue on it.
+
+   The continuation runs on main, so callers may touch the graph and the
+   engine's state exactly as they did when this was inline. It does not run at
+   all if something else has since started an open — see `openToken`.
+   */
+  private func openReader(for track: Track,
+                          then continuation: @escaping (Result<TrackReader, Error>) -> Void) {
+    openToken &+= 1
+    let token = openToken
+    let factory = self.factory
+    openQueue.async {
+      let result = Result<TrackReader, Error> {
+        let reader = try factory.makeReader(for: track)
+        try reader.open()
+        return reader
+      }
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.openToken == token else { return }
+        continuation(result)
+      }
+    }
+  }
+
+
   private func move(to index: Int, userInitiated: Bool) throws {
     guard queue.tracks.indices.contains(index) else {
       if index >= queue.tracks.count { finish() }
@@ -525,33 +571,55 @@ public final class PlaybackEngine {
     }
     let listened = listenedSeconds()
     cancelTransition()
+    let track = queue.tracks[index]
 
-    // Opened *before* the outgoing track is touched. `open()` on a remote
-    // track is a network round trip, and silencing and stopping the outgoing
-    // track first meant the gap between pressing skip and hearing anything was
-    // however long that fetch took — reported from a car as several seconds of
-    // nothing, and absent on a downloaded playlist, where opening a local file
-    // is instant. Audio renders on its own thread, so the outgoing track keeps
-    // playing throughout this.
-    //
-    // It also means a failure to open leaves the current track playing rather
-    // than stopping it and cutting its gain to zero, which is a better answer
-    // to a skip that cannot be served than silence.
-    let reader = try factory.makeReader(for: queue.tracks[index])
-    try reader.open()
-
-    // A skip is a cut, not a fade — `transitionDuration` says so, and here it
-    // is honoured by not starting one at all.
-    graph.cut(graph.activeVoice, to: 0)
-    activePlayback?.stop()
-
+    // The queue moves now, not when the network answers. The lock screen, the
+    // car and the interface should show the track that was asked for the
+    // moment it is asked for; making them wait on a fetch is what makes a skip
+    // feel broken even when it eventually works.
     queue.set(queue.tracks, startIndex: index)
-    try beginTrack(at: index, fromFrame: 0, previousListenedSec: listened, prepared: reader)
+    let stateBeforeSkip = state
+    state = .buffering
+    emit(.trackChanged(index: index, id: track.id, previousListenedSec: listened))
+    publishNowPlaying()
+
+    // Opened off the main thread, and *before* the outgoing track is touched.
+    // Two separate faults were here: the fetch ran on the main thread, and the
+    // outgoing track was silenced and stopped before it started. The first
+    // froze the interface for the length of the fetch; the second meant the
+    // listener got dead air for the same stretch — reported from a car, and
+    // absent on a downloaded playlist where opening a local file is instant.
+    //
+    // Audio renders on its own thread, so the outgoing track goes on playing
+    // until the replacement is ready. A failure to open now leaves it playing
+    // rather than stopping it and cutting its gain to zero, which is a better
+    // answer to a skip that cannot be served than silence.
+    openReader(for: track) { [weak self] result in
+      guard let self else { return }
+      switch result {
+      case .failure(let error):
+        // Back to whatever was interrupted — the outgoing track is still
+        // playing, since nothing was torn down.
+        self.state = stateBeforeSkip
+        self.emit(.failed("Could not open \(track.title): \(error)"))
+      case .success(let reader):
+        // A skip is a cut, not a fade — `transitionDuration` says so, and here
+        // it is honoured by not starting one at all.
+        self.graph.cut(self.graph.activeVoice, to: 0)
+        self.activePlayback?.stop()
+        do {
+          try self.beginTrack(at: index, fromFrame: 0, prepared: reader, announced: true)
+        } catch {
+          self.emit(.failed("Could not play \(track.title): \(error)"))
+        }
+      }
+    }
   }
 
   private func beginTrack(at index: Int, fromFrame frame: Int64,
                           previousListenedSec: Double? = nil,
-                          prepared: TrackReader? = nil) throws {
+                          prepared: TrackReader? = nil,
+                          announced: Bool = false) throws {
     guard let track = queue.tracks.indices.contains(index) ? queue.tracks[index] : nil else {
       finish()
       return
@@ -605,7 +673,12 @@ public final class PlaybackEngine {
     listenedAccumulated = 0
     listeningSince = now()
 
-    emit(.trackChanged(index: index, id: track.id, previousListenedSec: previousListenedSec))
+    // `announced` means the caller already said so — a skip announces the
+    // moment the button is pressed rather than when the network answers, and
+    // saying it twice would have a host scrobble or redraw for one skip twice.
+    if !announced {
+      emit(.trackChanged(index: index, id: track.id, previousListenedSec: previousListenedSec))
+    }
     publishNowPlaying()
     startTicking()
   }
@@ -767,9 +840,28 @@ public final class PlaybackEngine {
     guard let next = queue.nextTrack else { return }
     transitioning = true
 
+    // Off the main thread, like a skip. This runs from the ticker, which is
+    // scheduled on `RunLoop.main`, so opening inline froze the interface at
+    // the start of every crossfade — the one moment a listener is most likely
+    // to be looking at it. The outgoing track is untouched until the reader
+    // arrives, so a slow fetch delays the fade rather than interrupting it.
+    openReader(for: next) { [weak self] result in
+      guard let self else { return }
+      guard case .success(let reader) = result else {
+        // Nothing has been touched, so the track simply plays to its end and
+        // `handleTrackFinished` takes it from there.
+        self.transitioning = false
+        if case .failure(let error) = result {
+          self.emit(.failed("Could not open \(next.title): \(error)"))
+        }
+        return
+      }
+      self.continueTransition(over: duration, next: next, reader: reader)
+    }
+  }
+
+  private func continueTransition(over duration: TimeInterval, next: Track, reader: TrackReader) {
     do {
-      let reader = try factory.makeReader(for: next)
-      try reader.open()
       graph.reconnectIdleVoice(toSourceRate: reader.sampleRate)
 
       let incoming = TrackPlayback(reader: reader, voice: graph.idleVoice, label: "decode.incoming")
@@ -819,6 +911,10 @@ public final class PlaybackEngine {
   private func cancelTransition() {
     guard transitioning else { return }
     transitioning = false
+    // A fade whose reader is still being fetched has to be abandoned too, or
+    // it lands after the thing that cancelled it and starts a crossfade into a
+    // track that is no longer next.
+    openToken &+= 1
     incomingPlayback?.stop()
     incomingPlayback = nil
     incomingTrack = nil

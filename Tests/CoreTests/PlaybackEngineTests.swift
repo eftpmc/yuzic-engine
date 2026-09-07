@@ -86,10 +86,13 @@ final class PlaybackEngineTests: XCTestCase {
   }
 
   /// The assumption has to clear lossless, or the same fault returns by format.
-  func testTheAssumedBitrateClearsLossless() {
-    // A CD-rate FLAC is around 1100 kbps; 24/96 runs higher still.
-    XCTAssertGreaterThan(HTTPTrackReaderFactory.assumedBitrate, 1_411_000,
-                         "must exceed uncompressed CD audio, not just transcoded output")
+  func testTheAssumedBitrateClearsUncompressedHiRes() {
+    // 24-bit/192kHz stereo is 9.22 Mbps uncompressed — the realistic ceiling.
+    // Clearing it means no format can be under-reported and truncated, which
+    // is what 320 kbps did to an ordinary CD-rate FLAC.
+    let uncompressed24_192 = 24.0 * 192_000 * 2
+    XCTAssertGreaterThan(HTTPTrackReaderFactory.assumedBitrate, uncompressed24_192,
+                         "must exceed uncompressed hi-res, not just transcoded output")
   }
 
   func testTheReaderWinsWhenTheTwoAgree() {
@@ -111,34 +114,47 @@ final class PlaybackEngineTests: XCTestCase {
   }
 
   /**
-   A skip opens the next track before silencing this one.
+   A skip neither blocks the main thread nor silences what is playing.
 
-   `open()` on a remote track is a network round trip. The old order silenced
-   the outgoing track and stopped it *first*, so the listener got dead air for
-   however long the fetch took — reported from a car as several seconds of
-   nothing on a skip, and absent on a downloaded playlist, where opening a
-   local file is instant. That difference is the whole diagnosis.
+   Both halves of the reported fault, asserted together. `open()` on a remote
+   track is a network round trip; the old code ran it on the main thread *and*
+   silenced and stopped the outgoing track before starting it. So a car skip
+   froze the interface and produced dead air for the length of the fetch —
+   and the same skip on a downloaded playlist was instant, which is what
+   identified it.
 
-   Audio renders on its own thread, so keeping the outgoing track alive across
-   the open means it goes on playing. This asserts the ordering directly: at
-   the moment the next reader is made, the voice must still be audible and the
-   old playback must still be running.
+   The factory here blocks inside `makeReader` the way a slow network would.
+   While it is blocked the test asserts, on the main thread, that the outgoing
+   voice is still audible. That the assertions run at all is the other half:
+   if the open were still inline, this thread would be stuck inside
+   `skipToNext` and could not observe anything.
    */
-  func testASkipOpensTheNextTrackBeforeSilencingThisOne() throws {
+  func testASkipNeitherBlocksTheMainThreadNorGoesSilent() throws {
     let (engine, factory, graph) = try makeEngine()
     engine.setQueue([song("a"), song("b")], startIndex: 0)
     try engine.play()
 
-    var gainWhenNextWasOpened: Float?
+    let opening = DispatchSemaphore(value: 0)   // the fetch has started
+    let release = DispatchSemaphore(value: 0)   // let it finish
     factory.onMakeReader = { id in
-      // Only the skip's open, not the first track's.
-      if id == "b" { gainWhenNextWasOpened = graph.activeVoice.gain.outputVolume }
+      guard id == "b" else { return }
+      opening.signal()
+      release.wait()
     }
 
     try engine.skipToNext()
 
-    XCTAssertEqual(gainWhenNextWasOpened, 1,
-                   "the outgoing track must still be audible while the next one opens")
+    // Main thread is free: we reached here while the fetch is outstanding.
+    XCTAssertEqual(opening.wait(timeout: .now() + 3), .success,
+                   "the open should have started on another thread")
+    XCTAssertEqual(graph.activeVoice.gain.outputVolume, 1,
+                   "the outgoing track must still be audible during the fetch")
+    XCTAssertEqual(engine.queue.activeIndex, 1,
+                   "and the queue should already show what was asked for")
+
+    release.signal()
+    settle { factory.opened == ["a", "b"] }
+    XCTAssertEqual(factory.opened, ["a", "b"])
   }
 
   // MARK: - Volume, and the node it is allowed to touch
@@ -169,12 +185,13 @@ final class PlaybackEngineTests: XCTestCase {
 
   /// A skip used to discard volume, because the new track's gain was cut to 1.
   func testVolumeSurvivesASkip() throws {
-    let (engine, _, graph) = try makeEngine()
+    let (engine, factory, graph) = try makeEngine()
     engine.setQueue([song("a"), song("b")], startIndex: 0)
     try engine.play()
     engine.volume = 0.4
 
     try engine.skipToNext()
+    settle { factory.opened == ["a", "b"] }
 
     XCTAssertEqual(graph.activeVoice.player.volume, 0.4, accuracy: 0.0001,
                    "the next track should play at the volume the user chose")
@@ -314,6 +331,21 @@ final class PlaybackEngineTests: XCTestCase {
 
   private func song(_ id: String, durationSec: Double? = 3) -> Track {
     Track(id: id, uri: "file:///\(id).wav", title: id, durationSec: durationSec)
+  }
+
+  /**
+   Drive the main runloop until a condition holds.
+
+   A skip opens its reader off the main thread and lands the handover back on
+   it, so the effect of `skipToNext` is not visible on the line after the call.
+   That is the point — the fetch no longer blocks the interface — but it means
+   a test has to let the runloop turn rather than assert immediately.
+   */
+  private func settle(timeout: TimeInterval = 3, until condition: () -> Bool) {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition(), Date() < deadline {
+      RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    }
   }
 
   private func makeEngine() throws -> (PlaybackEngine, FixtureFactory, AudioGraph) {
@@ -457,8 +489,11 @@ final class PlaybackEngineTests: XCTestCase {
     try engine.play()
     try engine.skipToNext()
 
-    XCTAssertEqual(factory.opened, ["a", "b"])
+    // The queue moves immediately — the lock screen should not wait on a fetch.
     XCTAssertEqual(engine.queue.activeIndex, 1)
+    // The reader arrives once the open completes off the main thread.
+    settle { factory.opened == ["a", "b"] }
+    XCTAssertEqual(factory.opened, ["a", "b"])
   }
 
   func testSkippingPastTheEndFinishesRatherThanCrashing() throws {
