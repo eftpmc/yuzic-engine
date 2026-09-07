@@ -110,6 +110,37 @@ final class PlaybackEngineTests: XCTestCase {
     XCTAssertEqual(PlaybackEngine.referenceDuration(readerSec: 0, declaredSec: 200), 200)
   }
 
+  /**
+   A skip opens the next track before silencing this one.
+
+   `open()` on a remote track is a network round trip. The old order silenced
+   the outgoing track and stopped it *first*, so the listener got dead air for
+   however long the fetch took — reported from a car as several seconds of
+   nothing on a skip, and absent on a downloaded playlist, where opening a
+   local file is instant. That difference is the whole diagnosis.
+
+   Audio renders on its own thread, so keeping the outgoing track alive across
+   the open means it goes on playing. This asserts the ordering directly: at
+   the moment the next reader is made, the voice must still be audible and the
+   old playback must still be running.
+   */
+  func testASkipOpensTheNextTrackBeforeSilencingThisOne() throws {
+    let (engine, factory, graph) = try makeEngine()
+    engine.setQueue([song("a"), song("b")], startIndex: 0)
+    try engine.play()
+
+    var gainWhenNextWasOpened: Float?
+    factory.onMakeReader = { id in
+      // Only the skip's open, not the first track's.
+      if id == "b" { gainWhenNextWasOpened = graph.activeVoice.gain.outputVolume }
+    }
+
+    try engine.skipToNext()
+
+    XCTAssertEqual(gainWhenNextWasOpened, 1,
+                   "the outgoing track must still be audible while the next one opens")
+  }
+
   // MARK: - Volume, and the node it is allowed to touch
 
   /**
@@ -257,10 +288,14 @@ final class PlaybackEngineTests: XCTestCase {
   private final class FixtureFactory: TrackReaderFactory {
     let data: Data
     private(set) var opened: [MediaId] = []
+    /// Called as a reader is made, so a test can look at the graph at exactly
+    /// the moment the engine would be blocking on a network round trip.
+    var onMakeReader: ((MediaId) -> Void)?
     init(data: Data) { self.data = data }
 
     func makeReader(for track: Track) throws -> TrackReader {
       opened.append(track.id)
+      onMakeReader?(track.id)
       let source = CachedByteSource(fetcher: MemoryFetcher(data), windowBytes: 32 * 1024)
       return AudioFileReader(source: source)
     }

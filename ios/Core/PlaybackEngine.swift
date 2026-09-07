@@ -525,25 +525,49 @@ public final class PlaybackEngine {
     }
     let listened = listenedSeconds()
     cancelTransition()
+
+    // Opened *before* the outgoing track is touched. `open()` on a remote
+    // track is a network round trip, and silencing and stopping the outgoing
+    // track first meant the gap between pressing skip and hearing anything was
+    // however long that fetch took — reported from a car as several seconds of
+    // nothing, and absent on a downloaded playlist, where opening a local file
+    // is instant. Audio renders on its own thread, so the outgoing track keeps
+    // playing throughout this.
+    //
+    // It also means a failure to open leaves the current track playing rather
+    // than stopping it and cutting its gain to zero, which is a better answer
+    // to a skip that cannot be served than silence.
+    let reader = try factory.makeReader(for: queue.tracks[index])
+    try reader.open()
+
     // A skip is a cut, not a fade — `transitionDuration` says so, and here it
     // is honoured by not starting one at all.
     graph.cut(graph.activeVoice, to: 0)
     activePlayback?.stop()
 
     queue.set(queue.tracks, startIndex: index)
-    try beginTrack(at: index, fromFrame: 0, previousListenedSec: listened)
+    try beginTrack(at: index, fromFrame: 0, previousListenedSec: listened, prepared: reader)
   }
 
   private func beginTrack(at index: Int, fromFrame frame: Int64,
-                          previousListenedSec: Double? = nil) throws {
+                          previousListenedSec: Double? = nil,
+                          prepared: TrackReader? = nil) throws {
     guard let track = queue.tracks.indices.contains(index) ? queue.tracks[index] : nil else {
       finish()
       return
     }
 
     state = .buffering
-    let reader = try factory.makeReader(for: track)
-    try reader.open()
+    // `prepared` is a reader the caller already opened, which is how a skip
+    // avoids a silent gap — see `move`. Opening here is the path for callers
+    // that have nothing playing to protect.
+    let reader: TrackReader
+    if let prepared {
+      reader = prepared
+    } else {
+      reader = try factory.makeReader(for: track)
+      try reader.open()
+    }
 
     // This path starts the track on the *active* voice, so that is the one that
     // has to match the file's rate — reconnecting the idle voice here would
