@@ -242,6 +242,21 @@ is unsupported at any version. Those need bundled decoders (libogg, libvorbis,
 libopus) and a second, parallel code path. Budget for it rather than finding it
 late.
 
+> **Status: half built, and the prediction held exactly.** It was found late
+> anyway — by a listener, as one album of a real library showing "Unable to
+> play track" while everything around it played.
+>
+> `TrackReader` is the parallel path, and `VorbisFileReader` is the first
+> thing on it: libogg and libvorbis are vendored under `ios/Vendor` and the
+> factory picks a decoder by reading the codec name out of the first Ogg page.
+> Not by extension — a stream URL has none — and not by container either,
+> since Opus and FLAC also live in Ogg behind the same `OggS`.
+>
+> **Opus is still not decoded.** A `.opus` file is transcoded by the server
+> instead, which works and is not what Original quality is for. libopus is the
+> same shape of job as libvorbis was, now that the seam and the two-build-system
+> vendoring both exist.
+
 **Apple's FLAC and MP3 decoders ignore the seek structures in the file.** They
 decode from byte zero instead of using FLAC's `SEEKTABLE` or MP3's Xing/LAME
 TOC, so seek cost is linear in distance. Measured on a 75-minute file, seeking
