@@ -107,11 +107,28 @@ Reasoning for each is in [docs/architecture.md](docs/architecture.md).
   and skipped 2112 frames of real audio per track. The padding figures are
   still read and exposed, and a test pins the platform behaviour so that if it
   ever changes, this becomes work again.
-- **Android has never run.** It compiles — it did not before, and the three
-  errors were the kind only a compiler finds. Both platforms now declare the
-  same twenty-four functions, checked by comparing the two modules rather than
-  by reading them, because the module's own header calls a divergence here the
-  worst kind of bug to find.
+- **Android has never run**, and is now eleven methods behind iOS.
+
+  It compiles — it did not before, and the three errors were the kind only a
+  compiler finds. The two modules did reach parity at twenty-four functions
+  each, and that claim then went stale the same day: queue editing, repeat,
+  speed and the disk cache were added to iOS only, and the comparison was not
+  re-run. Declared in `AudioEngine.ts` and **absent** from the Kotlin:
+
+  | | |
+  | --- | --- |
+  | queue editing | `insertAt` `removeAt` `move` `clearQueue` `getQueue` |
+  | transport | `setSpeed` `setRepeatMode` |
+  | cache | `configureCache` `clearCache` `cacheStats` `evict` |
+
+  Absent, not inert: `YuzicEngine.ts` is a pass-through with no platform
+  branching, so each of these throws at the bridge on Android. A host must not
+  call them there.
+
+  The lesson is worth keeping with the list. Parity between two platforms is
+  only true at the moment it is measured, and this file asserted it from memory
+  for several hours after it stopped being so. Re-derive it from the modules
+  before relying on it.
 
   Compiling is the whole of the evidence. There is no Kotlin test target and
   nothing has been on a device or an emulator, so every behaviour below the
