@@ -24,6 +24,9 @@ class PlaybackQueue {
   var crossfade: CrossfadeRecord? = null
   var sampleRateMode: String = "fixed"
 
+  /** `off`, `one` or `all`, matching `RepeatMode` in `src/types.ts`. */
+  var repeatMode: String = "off"
+
   fun set(tracks: List<TrackRecord>, startIndex: Int) {
     this.tracks = tracks
     this.activeIndex = startIndex.coerceIn(0, maxOf(0, tracks.size - 1))
@@ -33,11 +36,81 @@ class PlaybackQueue {
     tracks = tracks + more
   }
 
+  // MARK: - Editing
+  //
+  // One rule, and every method below serves it: the active index keeps pointing
+  // at the same track. Each case is an off-by-one in a different direction, and
+  // getting one wrong does not crash — it plays a different song, which gets
+  // reported as "it randomly skips". Ported case-for-case from
+  // `ios/Core/PlaybackQueue.swift`; `PlaybackQueueEditingTests.swift` is the
+  // shared behaviour spec.
+
+  /** Out of range appends rather than throwing — a host asking for "the end" is not an error. */
+  fun insert(more: List<TrackRecord>, at: Int) {
+    if (more.isEmpty()) return
+    val index = at.coerceIn(0, tracks.size)
+    tracks = tracks.subList(0, index) + more + tracks.subList(index, tracks.size)
+    // `<=`, not `<`: "play this next" inserts *at* the playhead, and the track
+    // already playing must be pushed down rather than displaced.
+    if (index <= activeIndex) activeIndex += more.size
+  }
+
+  fun remove(at: Int) {
+    if (at !in tracks.indices) return
+    tracks = tracks.subList(0, at) + tracks.subList(at + 1, tracks.size)
+    if (at < activeIndex) activeIndex -= 1
+    // Removing the active track slides the next one into its place, so the
+    // index is only clamped rather than moved. Emptying the queue leaves it at
+    // 0 with nothing active, which `activeTrack` reports as null.
+    activeIndex = activeIndex.coerceIn(0, maxOf(0, tracks.size - 1))
+  }
+
+  fun move(from: Int, to: Int) {
+    if (from !in tracks.indices) return
+    val destination = to.coerceIn(0, tracks.size - 1)
+    if (from == destination) return
+
+    val mutable = tracks.toMutableList()
+    mutable.add(destination, mutable.removeAt(from))
+    tracks = mutable
+
+    // Three cases, and only the first is about the moved item itself.
+    if (from == activeIndex) {
+      activeIndex = destination
+    } else if (from < activeIndex && destination >= activeIndex) {
+      activeIndex -= 1
+    } else if (from > activeIndex && destination <= activeIndex) {
+      activeIndex += 1
+    }
+  }
+
+  fun clear() {
+    tracks = emptyList()
+    activeIndex = 0
+  }
+
   val activeTrack: TrackRecord?
     get() = tracks.getOrNull(activeIndex)
 
+  /**
+   * Which track follows, honouring repeat.
+   *
+   * `one` returns the *active* index rather than null, so a crossfade still has
+   * something to fade into — returning null there would silently disable the
+   * fade for the one case where the overlap is most audible.
+   */
+  val nextIndex: Int?
+    get() {
+      if (tracks.isEmpty()) return null
+      return when (repeatMode) {
+        "one" -> activeIndex
+        "all" -> (activeIndex + 1) % tracks.size
+        else -> (activeIndex + 1).takeIf { it in tracks.indices }
+      }
+    }
+
   val nextTrack: TrackRecord?
-    get() = tracks.getOrNull(activeIndex + 1)
+    get() = nextIndex?.let { tracks.getOrNull(it) }
 
   /**
    * How long the transition out of the current track should take, in seconds.

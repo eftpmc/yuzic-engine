@@ -94,6 +94,78 @@ class YuzicEngineModule : Module() {
       queue.activeIndex
     }
 
+    // MARK: queue editing
+    //
+    // The queue object keeps the index rule (see PlaybackQueue), and the player
+    // is edited through Media3's own timeline operations rather than by pushing
+    // the whole queue again. That difference is the whole point: `setMediaItems`
+    // restarts the current item from zero, so re-pushing on every edit would
+    // restart the song whenever anything else in the list moved.
+
+    AsyncFunction("insertAt") { index: Int, tracks: List<TrackRecord> ->
+      if (tracks.isNotEmpty()) {
+        val at = index.coerceIn(0, queue.tracks.size)
+        queue.insert(tracks, at)
+        tracks.forEach { TrackHeaders.register(it.uri, it.headers) }
+        onMain {
+          PlaybackService.graph?.activeVoice?.player
+            ?.addMediaItems(at, tracks.map { it.toMediaItem() })
+        }
+        sendEvent("onQueueChange", emptyMap<String, Any?>())
+      }
+    }
+
+    AsyncFunction("removeAt") { index: Int ->
+      if (index in queue.tracks.indices) {
+        queue.remove(index)
+        onMain { PlaybackService.graph?.activeVoice?.player?.removeMediaItem(index) }
+        sendEvent("onQueueChange", emptyMap<String, Any?>())
+      }
+    }
+
+    AsyncFunction("move") { from: Int, to: Int ->
+      if (from in queue.tracks.indices) {
+        val destination = to.coerceIn(0, queue.tracks.size - 1)
+        if (from != destination) {
+          queue.move(from, destination)
+          onMain { PlaybackService.graph?.activeVoice?.player?.moveMediaItem(from, destination) }
+          sendEvent("onQueueChange", emptyMap<String, Any?>())
+        }
+      }
+    }
+
+    AsyncFunction("clearQueue") {
+      queue.clear()
+      onMain { PlaybackService.graph?.activeVoice?.player?.clearMediaItems() }
+      TrackHeaders.clear()
+      sendEvent("onQueueChange", emptyMap<String, Any?>())
+    }
+
+    // The only call that sends tracks *back* across the bridge, which is why it
+    // is a device probe rather than a unit test: a declared shape that
+    // typechecks and then throws at runtime is this module's recorded history.
+    AsyncFunction("getQueue") {
+      queue.tracks.map { it.toMap() }
+    }
+
+    AsyncFunction("setRepeatMode") { mode: String ->
+      queue.repeatMode = mode
+      // Media3 owns the timeline, so repeat is its decision to make rather than
+      // something this module arranges by hand. The queue keeps its own copy
+      // because `nextTrack` — and therefore the crossfade — has to agree.
+      val media3 = when (mode) {
+        "one" -> Player.REPEAT_MODE_ONE
+        "all" -> Player.REPEAT_MODE_ALL
+        else -> Player.REPEAT_MODE_OFF
+      }
+      onMain {
+        PlaybackService.graph?.let { graph ->
+          graph.voiceA.player.repeatMode = media3
+          graph.voiceB.player.repeatMode = media3
+        }
+      }
+    }
+
     // MARK: transport
     //
     // Everything here goes through the *active voice's* ExoPlayer, which is
@@ -136,6 +208,19 @@ class YuzicEngineModule : Module() {
         if (index in queue.tracks.indices) {
           it.seekTo(index, 0L)
           syncActiveIndexFrom(it)
+        }
+      }
+    }
+
+    // Both voices, for the same reason the equalizer sets both: during a
+    // crossfade the pair is audible together, and a speed applied to one of
+    // them would be heard as the two drifting apart.
+    AsyncFunction("setSpeed") { speed: Double ->
+      val rate = speed.coerceIn(0.25, 4.0).toFloat()
+      onMain {
+        PlaybackService.graph?.let { graph ->
+          graph.voiceA.player.setPlaybackSpeed(rate)
+          graph.voiceB.player.setPlaybackSpeed(rate)
         }
       }
     }
@@ -720,6 +805,23 @@ class BrowseNodeRecord : Record {
   @Field var children: List<BrowseNodeRecord>? = null
   @Field var playable: TrackRecord? = null
 }
+
+/**
+ * The shape `getQueue` sends back to JS.
+ *
+ * Built by hand rather than returning the `Record`, because what crosses here
+ * has to match `Track` in `src/types.ts` exactly — the host reads these back
+ * after every edit — and an omitted field is a silent null on the other side
+ * rather than a compile error on this one. Nulls are kept rather than dropped
+ * so the absent fields are visible in the payload.
+ */
+fun TrackRecord.toMap(): Map<String, Any?> = mapOf(
+  "id" to id, "uri" to uri, "title" to title, "artist" to artist,
+  "album" to album, "artworkUri" to artworkUri, "durationSec" to durationSec,
+  "headers" to headers, "followsPrevious" to followsPrevious,
+  "replayGainDb" to replayGainDb, "replayGainPeak" to replayGainPeak,
+  "continuous" to continuous,
+)
 
 /**
  * A track as Media3 sees it.
