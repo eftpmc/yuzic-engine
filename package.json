@@ -22,7 +22,7 @@
     "README.md"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.build.json --noEmit",
     "test": "jest",
     "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build"

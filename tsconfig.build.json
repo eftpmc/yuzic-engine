@@ -4,8 +4,18 @@
     "noEmit": false,
     "outDir": "lib",
     "declaration": true,
-    "module": "CommonJS",
-    "moduleResolution": "node"
+    // `Node16` rather than `CommonJS`/`node`, so packages that expose their
+    // types through `exports` resolve at all — react-native keeps its
+    // declarations at `types_generated`, which classic `node` resolution
+    // cannot see. The failure surfaces only when this package is installed
+    // from git, because `prepare` runs `build`, so a broken value here makes
+    // the package uninstallable while every local check still passes.
+    //
+    // The emitted format is unchanged. `Node16` picks per file from the
+    // nearest `package.json` `type` field; this package has none, so files
+    // still emit CommonJS and `main: lib/index.js` still resolves.
+    "module": "Node16",
+    "moduleResolution": "Node16"
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"]
