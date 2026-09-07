@@ -31,3 +31,8 @@ tone.mp3
 .build/
 .swiftpm/
 Package.resolved
+
+# Tools/ is Python. Matches at any depth, which is safe here only because
+# nothing vendored is named __pycache__ — see the bare `lib/` that once ate
+# ios/Vendor/vorbis/lib.
+__pycache__/

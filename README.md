@@ -160,6 +160,23 @@ local check passed.
 notices. It exists because a test suite can be green and vacuous — one of these
 was named for the crossfade and could not observe the crossfade curve.
 
+`Tools/parity.py` compares the two native modules by **signature**, not by
+name, and exits non-zero when they disagree:
+
+```sh
+python3 Tools/parity.py
+```
+
+A name-only diff — which is what this repository used to recommend — is silent
+about the failure that actually happened: a `setBrowseTree` present on both
+platforms whose arity differed, arriving at a call site as a type error
+somewhere unrelated. This resolves each `Record` parameter to its *field shape*
+before comparing, so the platforms are free to name the same wire type
+differently (`BrowseNodeRecord` and `FlatBrowseNodeRecord` are the same six
+fields) without that reading as a mismatch. Deliberate gaps are declared in
+`KNOWN_GAPS` with the reason; a gap that gets closed is reported as a stale
+entry, so the list cannot quietly become a record of what used to be true.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), which covers the one rule about where
