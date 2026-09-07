@@ -41,9 +41,38 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
 
   public func makeReader(for track: Track) throws -> TrackReader {
     let source = try makeSource(for: track)
+
+    // Sniffed from the bytes, not from the URI. A stream URL carries no
+    // extension — `/rest/stream.view?id=…` is the same shape whatever the
+    // file is — and a server may transcode on the way out, so the only honest
+    // answer to "what is this" is the first four bytes.
+    if Self.isOgg(source) {
+      let reader = VorbisFileReader(source: source)
+      try reader.open()
+      return reader
+    }
+
     let reader = AudioFileReader(source: source)
     try reader.open(hint: Self.typeHint(for: track.uri))
     return reader
+  }
+
+  /**
+   Whether this is an Ogg container.
+
+   `OggS` is the page capture pattern and it is at byte zero of every Ogg
+   stream. Vorbis is assumed beyond that: Opus and FLAC-in-Ogg exist, and
+   neither is supported yet, so they will fail in the reader with a header
+   error rather than being silently mistaken for Vorbis.
+
+   A source that cannot be read yet returns false and the Core Audio path is
+   tried, which is what would have happened anyway.
+   */
+  static func isOgg(_ source: ByteSource) -> Bool {
+    guard let magic = try? source.read(offset: 0, count: 4), magic.count == 4 else {
+      return false
+    }
+    return magic.elementsEqual([0x4F, 0x67, 0x67, 0x53])  // "OggS"
   }
 
   func makeSource(for track: Track) throws -> ByteSource {

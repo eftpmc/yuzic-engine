@@ -22,7 +22,32 @@ let package = Package(
     .library(name: "YuzicEngineCore", targets: ["YuzicEngineCore"]),
   ],
   targets: [
-    .target(name: "YuzicEngineCore", path: "ios/Core"),
+    /**
+     Xiph's reference decoders, vendored as one C target.
+
+     One target rather than two, and one `include/` root holding both `ogg/`
+     and `vorbis/`, because the podspec needs a single `header_mappings_dir`
+     to stop CocoaPods flattening the headers — it puts every public header in
+     one directory, and libvorbis includes `<ogg/os_types.h>` by path.
+     Splitting them here and merging them there is how the app build failed
+     while `swift build` was perfectly happy.
+
+     It is a SwiftPM target at all so that `swift test` can reach the decoder.
+     A decoder only the app build compiles is one no test can exercise, and
+     this engine has already been bitten by exactly that.
+     */
+    .target(
+      name: "CVorbis",
+      path: "ios/Vendor",
+      sources: ["ogg/src", "vorbis/lib"],
+      publicHeadersPath: "include",
+      cSettings: [
+        // libvorbis's sources include their own internal headers by bare name.
+        .headerSearchPath("vorbis/lib"),
+        .headerSearchPath("ogg/src"),
+      ]
+    ),
+    .target(name: "YuzicEngineCore", dependencies: ["CVorbis"], path: "ios/Core"),
     .testTarget(name: "CoreTests", dependencies: ["YuzicEngineCore"], path: "Tests/CoreTests"),
   ]
 )

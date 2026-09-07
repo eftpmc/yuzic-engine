@@ -16,3 +16,20 @@ is proprietary and whose licence forbids using it to build a competing product.
 react-native-track-player v4 and earlier is Apache-2.0 and may legitimately be
 referenced. Nothing has been taken from it so far. Anything taken in future is
 recorded here, with the change stated, as Apache-2.0 §4 requires.
+
+--------------------------------------------------------------------------
+
+This product bundles Xiph.Org Foundation software, vendored under
+ios/Vendor/ and used to decode Ogg Vorbis, which Apple's Core Audio does not
+support:
+
+  libogg 1.3.5    — ios/Vendor/ogg,    see ios/Vendor/ogg/COPYING
+  libvorbis 1.3.7 — ios/Vendor/vorbis, see ios/Vendor/vorbis/COPYING
+
+Both are Copyright (c) 2002-2020 Xiph.org Foundation and are licensed under
+the 3-clause BSD licence, reproduced in the COPYING files above.
+
+The sources are unmodified. Only a subset is included: the decoder, plus the
+encoder, which the test suite uses to generate a real Vorbis bitstream rather
+than depending on an external tool. Xiph's own build system files and the
+standalone tools carrying their own main() are omitted.
