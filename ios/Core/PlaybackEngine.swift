@@ -255,11 +255,11 @@ public final class PlaybackEngine {
     // This path starts the track on the *active* voice, so that is the one that
     // has to match the file's rate — reconnecting the idle voice here would
     // prepare the one node that is not about to be used, and leave the playing
-    // one on whatever rate it last had (48kHz on a fresh graph). Nothing sounds
-    // wrong when that happens, which is what makes it worth spelling out: the
-    // mixer resamples happily and only the reported *position* is wrong, by the
-    // ratio between the two rates. Safe to reconnect because this voice is not
-    // playing yet; the crossfade path is the one that must use the idle voice.
+    // one on whatever rate it last had (48kHz on a fresh graph). The track then
+    // plays 8.8% fast and a semitone and a half sharp, because the node reads
+    // the reader's 44.1kHz buffers as 48kHz ones; the position is wrong by the
+    // same ratio. Safe to reconnect because this voice is not playing yet; the
+    // crossfade path is the one that must use the idle voice.
     graph.reconnect(graph.activeVoice, toSourceRate: reader.sampleRate)
 
     activeReader = reader

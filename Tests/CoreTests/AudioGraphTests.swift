@@ -50,13 +50,15 @@ final class AudioGraphTests: XCTestCase {
    This is the assertion that would have caught a real bug: the direct-play
    path called `reconnectIdleVoice` and then started the track on the *active*
    voice, so the file's rate was applied to the one node that was not about to
-   be used. It is silent — the mixer resamples, so it sounds perfectly correct
-   — and shows up only as a wrong number, because `playerTime.sampleTime` then
-   counts in the connection's frames while the reader reports the file's. On a
-   44.1kHz track over a 48kHz connection the reported position runs 8.8% fast.
+   be used. A 44.1kHz track over a 48kHz connection then plays 8.8% fast and
+   about 1.5 semitones sharp — the node reads the reader's buffers as its own
+   rate — and reports its position wrong by the same ratio, because
+   `playerTime.sampleTime` counts in the connection's frames while the reader
+   reports the file's.
 
-   Checking the connection's rate rather than any audible property is therefore
-   the point, not a shortcut: audio is not what breaks.
+   Checking the connection's rate is the cheapest way to pin that: the audible
+   defect and the wrong number have this single cause, so the rate is the thing
+   worth asserting rather than either symptom.
    */
   func testReconnectTargetsTheVoiceItIsGiven() throws {
     let graph = AudioGraph()

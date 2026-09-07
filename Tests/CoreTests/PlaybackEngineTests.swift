@@ -109,10 +109,11 @@ final class PlaybackEngineTests: XCTestCase {
    passed while the direct-play path was reconnecting the wrong voice. This one
    pairs a 44.1kHz file with the 48kHz graph real hardware usually gives you.
 
-   The failure is silent: audio still comes out, resampled by the mixer, and
-   only the reported position is wrong — `playerTime.sampleTime` counts in the
-   connection's frames while `AudioFileReader.sampleRate` reports the file's,
-   so the playhead runs 8.8% fast and the crossfade starts early.
+   The failure is audible: the node reads the reader's 44.1kHz buffers as
+   48kHz ones, so the track plays 8.8% fast and about 1.5 semitones sharp. The
+   position is wrong by the same ratio — `playerTime.sampleTime` counts in the
+   connection's frames while `AudioFileReader.sampleRate` reports the file's —
+   so the playhead runs ahead and the crossfade starts early.
    */
   func testPlayingReconnectsTheVoiceItPlaysOn() throws {
     let fixture = try EncodedFixture.wav(seconds: 3)

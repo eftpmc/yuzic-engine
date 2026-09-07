@@ -150,15 +150,20 @@ public final class AudioGraph {
    one would glitch, which is the whole reason the swap happens on a pair
    rather than on a single node being reconfigured in place.
 
-   Getting this wrong is quiet rather than loud, which is why it takes the
-   voice explicitly instead of picking one. A player node connected at a rate
-   its file does not share still plays — resampled by the mixer, so it sounds
-   correct — but `playerTime.sampleTime` then advances in the *connection's*
-   frames while `AudioFileReader.sampleRate` reports the *file's*, and
-   `PlaybackEngine.progress` divides one by the other. A 44.1kHz track on a
-   48kHz connection reports its position 8.8% fast: the progress bar runs
-   ahead, the track appears to end early, and `shouldBeginTransition` starts
-   the crossfade before it should.
+   Getting this wrong is audible. `AudioFileReader.outputFormat` is built at
+   the file's native rate, so the buffers reaching `scheduleBuffer` carry the
+   file's frames — and a node connected at some other rate consumes them *as
+   if* they were its own. A 44.1kHz track on a 48kHz connection plays 8.8%
+   fast and about 1.5 semitones sharp. Nothing resamples it back: the mixer
+   converts what the node hands it, and the node has already decided those
+   samples are 48kHz ones.
+
+   The reported position is wrong by the same ratio and for the same reason —
+   `playerTime.sampleTime` advances in the connection's frames while
+   `AudioFileReader.sampleRate` reports the file's, and `PlaybackEngine
+   .progress` divides one by the other — so the progress bar runs ahead, the
+   track appears to end early, and `shouldBeginTransition` starts the
+   crossfade before it should.
    */
   public func reconnect(_ voice: Voice, toSourceRate rate: Double) {
     guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2) else { return }
