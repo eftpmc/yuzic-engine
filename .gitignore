@@ -1,5 +1,10 @@
 node_modules/
-lib/
+# Anchored to the root on purpose. As a bare `lib/` this matched *any*
+# directory called lib at any depth — including `ios/Vendor/vorbis/lib`,
+# which is libvorbis itself. Twenty-two C files were silently left out of
+# every commit, so the published package carried a Vorbis decoder with no
+# decoder in it, and local builds passed because the files were on disk.
+/lib/
 *.log
 
 # iOS
