@@ -436,7 +436,37 @@ public final class PlaybackEngine {
   }
 
   public func skipToPrevious() throws {
-    try move(to: queue.activeIndex - 1, userInitiated: true)
+    switch PlaybackEngine.previousAction(
+      positionSec: progress.positionSec, activeIndex: queue.activeIndex
+    ) {
+    case .restart: try seek(toSeconds: 0)
+    case .goBack: try move(to: queue.activeIndex - 1, userInitiated: true)
+    }
+  }
+
+  /// What `previous` means, which is not always "the previous track".
+  public enum PreviousAction: Equatable { case restart, goBack }
+
+  /// How far into a track `previous` stops meaning "go back" and starts
+  /// meaning "start this one again".
+  public static let previousRestartsAfterSec: Double = 3
+
+  /**
+   Whether `previous` restarts the current track or moves to the one before.
+
+   Past three seconds a person pressing previous almost always means "start
+   this again" rather than "leave" — and on the first track there is nothing to
+   leave to, so restarting is the only thing it can usefully do. iOS had
+   neither rule: it moved unconditionally, which on the first track computed
+   -1, was rejected by `move`, and did nothing at all.
+
+   Pure and separate for the same reason `shouldBeginTransition` is: it is the
+   decision, and driving three seconds of real audio to test it would test the
+   plumbing instead. Android's threshold is the same constant.
+   */
+  public static func previousAction(positionSec: Double, activeIndex: Int) -> PreviousAction {
+    if positionSec > previousRestartsAfterSec || activeIndex == 0 { return .restart }
+    return .goBack
   }
 
   public func skipTo(index: Int) throws {

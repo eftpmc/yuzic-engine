@@ -68,6 +68,33 @@ final class PlaybackEngineTests: XCTestCase {
   }
 
   /**
+   What `previous` means, which is not always "the previous track".
+
+   iOS moved unconditionally: on the first track that computed -1, `move`
+   rejected it, and the button did nothing at all. Android has had both rules
+   since the model port — past three seconds, or on the first track, previous
+   restarts. These are the same rule, now on both platforms.
+   */
+  func testPreviousRestartsPastThreeSeconds() {
+    let action = PlaybackEngine.previousAction
+
+    // Early in a track, previous means the previous track.
+    XCTAssertEqual(action(0.5, 2), .goBack)
+    XCTAssertEqual(action(3.0, 2), .goBack, "exactly three seconds is not yet past it")
+
+    // Past the threshold it means "start this one again".
+    XCTAssertEqual(action(3.1, 2), .restart)
+    XCTAssertEqual(action(90, 2), .restart)
+  }
+
+  func testPreviousOnTheFirstTrackRestartsRatherThanDoingNothing() {
+    // There is nothing before the first track, and the old behaviour computed
+    // -1 and was silently rejected. Restarting is the only useful meaning.
+    XCTAssertEqual(PlaybackEngine.previousAction(positionSec: 0.5, activeIndex: 0), .restart)
+    XCTAssertEqual(PlaybackEngine.previousAction(positionSec: 90, activeIndex: 0), .restart)
+  }
+
+  /**
    Repeat-one is deliberately not wrapped onto a user skip.
 
    `nextIndex` under `.one` returns the *current* index, because that is what
