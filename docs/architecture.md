@@ -416,10 +416,11 @@ config plugin's Info.plist scene entry lands only on a prebuild.
 
 ## 12. How this engine fails
 
-Not a design decision — a record. Every serious defect this engine has shipped
-has had the same shape, and it is worth naming because it is not the shape most
-review looks for. Nothing here threw. Nothing here failed a test suite. Each one
-was code that ran, returned, and accomplished nothing.
+Not a design decision — a record. The serious defects here have kept arriving in
+the same shape, and it is worth naming because it is not the shape most review
+looks for. Nothing below threw. Nothing below failed a test suite. Six of the
+seven are code that ran, returned, and accomplished nothing; the seventh is the
+same idea one level up, where what accomplished nothing was the handover.
 
 **A guard that guards nothing.** `remoteCommandsEnabled` re-registered the lock
 screen's targets only when the value changed. Correct in isolation; the previous
@@ -428,9 +429,7 @@ leaving the flag alone, so the one call that would have restored them was the
 one the guard skipped. The controls were greyed out on every device.
 
 **A function with no callers.** `handleConfigurationChange` was written, was
-correct, and was never invoked. So was `maybeBeginTransition` on Android — the
-whole point of a queue rewrite, compiled and shipped and never once starting a
-crossfade.
+correct, committed, shipped, and never invoked.
 
 **A stub that accepts and discards.** `setCrossfade` on Android took its
 argument, stored it, and no code read it. The API was complete and the feature
@@ -451,7 +450,16 @@ ignored — it was disabled before it could be pressed.
 `.playing` when play was requested rather than when the first buffer was
 scheduled, so a track that never buffered showed as playing at 0:00 forever.
 
-The common thread is that all six are invisible to "does it return, and is the
+**A change that is whole where it was tested and partial where it was sent.**
+The Android crossfade was built, wired and verified on a device by one author,
+then handed over as a set of hunks transcribed by hand and vouched for as
+complete. The hunk calling `maybeBeginTransition` was not among them. The
+receiving copy therefore had the entire overlap implementation and nothing that
+would ever run it — and it would have compiled, reviewed clean, and never once
+faded. Nothing was wrong with the code; the defect existed only in the copy, and
+only between two machines.
+
+The common thread is that all seven are invisible to "does it return, and is the
 return value right". What catches them is asking what the code *did* — which
 call ran, which caller reached it, what the user then heard. `Tools/mutate.py`
 automates one slice of this: break a real behaviour, and see whether any test
@@ -478,6 +486,20 @@ bare `lib/` in `.gitignore` kept all of libvorbis out of every commit while
 `swift test` and the app build both stayed green, because both were being fed
 the working tree. Before believing what a measurement implies, check that it
 could have come out differently.
+
+That test — could this have come out differently? — is also what caught the
+seventh shape above, and it is worth being precise about how, because it was not
+review and it was not a test suite. The hunks arrived with an assertion that
+they were complete. An assertion cannot fail. What failed was a mechanical check
+on the merged file: every helper named, and for each one, both a definition and
+a caller. `maybeBeginTransition` came back defined once and called zero times.
+The check took a minute to write, knew nothing about crossfades, and would have
+caught the omission whichever hunk had gone missing.
+
+The general form: when you receive work you did not do, verify a property of the
+result rather than trusting a claim about the process. "That is every hunk" and
+"the tests pass" are both claims about process. "Every function that exists is
+reachable" is a property of the artefact in front of you.
 
 ## What is not decided yet
 

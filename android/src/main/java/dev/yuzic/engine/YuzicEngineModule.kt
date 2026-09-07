@@ -244,10 +244,14 @@ class YuzicEngineModule : Module() {
 
     // MARK: cache
     //
-    // Deliberately *not* on the main thread: `Cache.removeResource` is
-    // annotated `@WorkerThread` and walks the index and the filesystem for
-    // every key. An `AsyncFunction` body already runs off the main thread,
-    // which is why these do not hop with `onMain` the way the player calls do.
+    // Deliberately *not* on the main thread, and this is the one place in the
+    // file where that is right. "Reaching the player" below says every player
+    // call must hop to main, because ExoPlayer throws off its own thread.
+    // `Cache.removeResource` is annotated `@WorkerThread` and walks the index
+    // and the filesystem per key, so it must *not* run there. An
+    // `AsyncFunction` body already runs on a background dispatcher, which means
+    // these three are correct exactly as written and wrapping them in `onMain`
+    // — for consistency with everything around them — would be the bug.
     //
     // `configureCache` is still absent, and absent rather than accepted and
     // ignored. `LeastRecentlyUsedCacheEvictor` takes its limit as a constructor
