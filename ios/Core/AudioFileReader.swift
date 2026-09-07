@@ -38,8 +38,19 @@ public final class AudioFileReader {
   private var audioFile: AudioFileID?
   private var extFile: ExtAudioFileRef?
 
-  /// Frames as the *file* counts them, which is what seeking is expressed in.
+  /// Playable frames — the music, with the encoder's padding already taken off
+  /// both ends. Seeking is expressed against this, not against the file.
   public private(set) var totalFrames: Int64 = 0
+
+  /// Silence the encoder put at the front, which playback skips. Zero for
+  /// formats that are sample-exact.
+  public private(set) var primingFrames: Int64 = 0
+  /// Silence at the end, which playback stops before.
+  public private(set) var remainderFrames: Int64 = 0
+
+  /// Playable frames handed out so far. Tracked rather than asked for, because
+  /// `ExtAudioFile` counts in file frames and this has to count in music.
+  private var framesRead: Int64 = 0
   public private(set) var sampleRate: Double = 0
   public private(set) var channelCount: UInt32 = 0
 
@@ -118,7 +129,45 @@ public final class AudioFileReader {
     var frames: Int64 = 0
     var frameSize = UInt32(MemoryLayout<Int64>.size)
     ExtAudioFileGetProperty(ext, kExtAudioFileProperty_FileLengthFrames, &frameSize, &frames)
+
+    readEncoderPadding(from: file)
+    // Used as reported. `ExtAudioFile` has already applied the packet table:
+    // measured on a 2s AAC file, it returns 88200 for 88200 frames of input
+    // with priming=2112 and remainder=824 sitting alongside — so this length
+    // is the music, and subtracting the padding again would report every lossy
+    // track ~3000 frames short.
     totalFrames = frames
+  }
+
+  /**
+   Encoder delay and padding, read for the record rather than to act on.
+
+   Lossy encoders cannot represent an arbitrary number of samples: MP3 and AAC
+   work in fixed blocks, so they pad the start (priming, for the decoder to
+   warm up) and the end (remainder, to fill the last block). Untrimmed, every
+   track gains a few tens of milliseconds of silence at each end — inaudible
+   alone, and exactly the seam that makes a live album or a DJ set sound
+   broken. This is what "gapless" is about.
+
+   **Core Audio already trims it, and this was measured rather than assumed.**
+   `ExtAudioFile` applies the packet table itself: `FileLengthFrames` comes
+   back as the playable length and the first read is music, not silence. The
+   first version of this code subtracted the padding from the length and
+   seeked past the priming — which reported every lossy track ~3000 frames
+   short and skipped 2112 frames of real audio at the head of each one. The
+   test alongside pins the platform behaviour so that stays visible.
+
+   Kept exposed because "how much padding does this file declare" is worth
+   being able to see, and because a future format handled by a decoder that
+   does *not* trim would need it.
+   */
+  private func readEncoderPadding(from file: AudioFileID) {
+    var info = AudioFilePacketTableInfo()
+    var size = UInt32(MemoryLayout<AudioFilePacketTableInfo>.size)
+    let status = AudioFileGetProperty(file, kAudioFilePropertyPacketTableInfo, &size, &info)
+    guard status == noErr else { return }
+    primingFrames = Int64(max(0, info.mPrimingFrames))
+    remainderFrames = Int64(max(0, info.mRemainderFrames))
   }
 
   /**
@@ -150,10 +199,15 @@ public final class AudioFileReader {
     return Int64(Double(available) / bytesPerFrame)
   }
 
+  /// Seek, in playable frames — which is what `ExtAudioFile` already counts
+  /// in, padding excluded. No priming correction here: adding one skips real
+  /// audio, which is what the first version of this did.
   public func seek(toFrame frame: Int64) throws {
     guard let extFile else { return }
-    let status = ExtAudioFileSeek(extFile, frame)
+    let clamped = max(0, min(frame, totalFrames))
+    let status = ExtAudioFileSeek(extFile, clamped)
     guard status == noErr else { throw ReaderError.readFailed(status) }
+    framesRead = clamped
   }
 
   /**
@@ -182,7 +236,15 @@ public final class AudioFileReader {
    */
   public func read(frames: AVAudioFrameCount) throws -> AVAudioPCMBuffer? {
     guard let extFile, let outputFormat else { return nil }
-    guard let buffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frames) else {
+
+    // Stop at the last frame of music rather than the last frame of file. The
+    // remainder is the encoder's block padding; decoding it would append
+    // silence to every lossy track, which is the other half of the seam.
+    let remaining = totalFrames > 0 ? totalFrames - framesRead : Int64(frames)
+    guard remaining > 0 else { return nil }
+    let wanted = AVAudioFrameCount(min(Int64(frames), remaining))
+
+    guard let buffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: wanted) else {
       return nil
     }
 
@@ -190,13 +252,14 @@ public final class AudioFileReader {
     // ExtAudioFileRead reads mDataByteSize to decide how much it may write.
     // Left at zero it returns paramErr — which looks exactly like an
     // unsupported format, and cost an hour during the spike.
-    buffer.frameLength = frames
+    buffer.frameLength = wanted
 
-    var count = frames
+    var count = wanted
     let status = ExtAudioFileRead(extFile, &count, buffer.mutableAudioBufferList)
     guard status == noErr else { throw ReaderError.readFailed(status) }
     guard count > 0 else { return nil }
 
+    framesRead += Int64(count)
     buffer.frameLength = count
     return buffer
   }

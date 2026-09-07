@@ -98,7 +98,15 @@ Reasoning for each is in [docs/architecture.md](docs/architecture.md).
 
 ## Still open
 
-- **Gapless detection**: encoder delay/padding metadata, or the host's word.
+- ~~**Gapless detection**: encoder delay/padding metadata, or the host's word.~~
+  **Neither — Core Audio already does it.** `ExtAudioFile` applies the packet
+  table itself: a two-second AAC file reports 88200 playable frames for 88200
+  in, with priming 2112 and remainder 824 sitting alongside untouched, and the
+  first read is music rather than silence. Measured, after an implementation
+  that trimmed it a second time reported every lossy track ~3000 frames short
+  and skipped 2112 frames of real audio per track. The padding figures are
+  still read and exposed, and a test pins the platform behaviour so that if it
+  ever changes, this becomes work again.
 - **Android has never run.** It compiles — it did not before, and the three
   errors were the kind only a compiler finds. Both platforms now declare the
   same twenty-four functions, checked by comparing the two modules rather than
@@ -121,12 +129,17 @@ Reasoning for each is in [docs/architecture.md](docs/architecture.md).
 
 ## What still stands between this and replacing the player
 
-Measured against every `TrackPlayer.*` call yuzic actually makes. On iOS, one:
+Measured against every `TrackPlayer.*` call yuzic actually makes.
 
-- **Gapless detection**, below. Everything else yuzic calls, the engine now
-  answers — queue editing, repeat, speed and the cache were the last of it.
+**On iOS: nothing.** Queue editing, repeat, speed and the cache were the last
+of it, and gapless turned out to be the platform's job already. What remains is
+not new engine surface — it is the host swap itself, and the questions a
+simulator cannot answer: mixed sample rates through the mixer, route changes
+mid-crossfade, thermals with two hi-res decoders (open questions 4, 5 and 7).
 
-On Android, the list is the one above: none of it has run.
+**On Android: all of it.** Nothing above has run, and it is behind besides —
+no speed, no repeat, no queue editing, and four cache calls that do nothing
+because Media3 keeps a cache of its own that has not been joined up.
 - ~~**Seek cost, measured.**~~ Answered, for both transports: seeking from 4.4s
   to 151.4s with only 11.1s buffered, against a real Navidrome over the open
   internet — **273ms** on a direct ranged stream, **333ms** on a transcoded one
