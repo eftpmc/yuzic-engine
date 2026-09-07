@@ -1,4 +1,5 @@
 import { requireNativeModule } from 'expo-modules-core';
+import { Platform } from 'react-native';
 
 import type { AudioEngine } from './AudioEngine';
 import { flattenBrowseTree } from './browseTree';
@@ -72,7 +73,29 @@ function toEvent(name: (typeof EVENTS)[number], payload: any): EngineEvent | nul
   }
 }
 
-export const YuzicEngine: AudioEngine = Object.assign(Object.create(native), {
+/**
+ * Every method `AudioEngine` promises, listed because TypeScript's interface
+ * is gone by the time this runs and the check below needs it at runtime.
+ *
+ * Keep in step with `AudioEngine`. A name missing here is not dangerous — that
+ * method simply falls back to the old behaviour — but a name here the
+ * interface has dropped will claim a platform gap that does not exist.
+ */
+const ENGINE_METHODS: readonly string[] = [
+  'setup', 'teardown',
+  'setQueue', 'append', 'insertAt', 'removeAt', 'move', 'clearQueue',
+  'getQueue', 'getActiveIndex',
+  'play', 'pause', 'stop', 'seekTo', 'skipToNext', 'skipToPrevious',
+  'skipToIndex',
+  'setVolume', 'setSpeed', 'setRepeatMode', 'getState', 'getProgress',
+  'setCrossfade', 'setEqualizer', 'setReplayGain', 'setSampleRateMode',
+  'configureCache', 'clearCache', 'cacheStats', 'evict',
+  'setBrowseTree', 'setCommands',
+  'sleepAfter', 'cancelSleep',
+  'addListener',
+];
+
+const base: AudioEngine = Object.assign(Object.create(native), {
   setBrowseTree(root: BrowseNode): Promise<void> {
     return native.setBrowseTree(root.title, flattenBrowseTree(root));
   },
@@ -85,5 +108,44 @@ export const YuzicEngine: AudioEngine = Object.assign(Object.create(native), {
       })
     );
     return () => subscriptions.forEach(subscription => subscription.remove());
+  },
+}) as AudioEngine;
+
+/**
+ * Say which platform is missing a method, rather than letting it read as a
+ * broken one.
+ *
+ * The facade is `Object.create(native)`, so a method a platform has not
+ * implemented is simply an absent property, and calling it throws
+ * `X is not a function` — indistinguishable from a typo, a bad import, or a
+ * native module that failed to link. Android is currently missing eleven of
+ * the methods listed above, so this is the common case rather than an edge.
+ *
+ * The rejection is deliberately *asynchronous*, matching every other method
+ * here: a caller that already handles a failed promise handles this too, and
+ * one that awaits gets the message rather than a synchronous throw part-way
+ * through a queue edit.
+ *
+ * This does not make an unimplemented method work. It makes "not built yet"
+ * distinguishable from "built wrong" at the boundary. `setCrossfade` on
+ * Android is the argument for caring: it exists, accepts, and silently does
+ * nothing, and no amount of reading the call site reveals that — the only way
+ * anyone found out was watching logcat for a decoder that never appeared.
+ */
+export const YuzicEngine: AudioEngine = new Proxy(base, {
+  get(target, property, receiver) {
+    const existing = Reflect.get(target, property, receiver);
+    if (existing !== undefined) return existing;
+    if (typeof property !== 'string' || !ENGINE_METHODS.includes(property)) {
+      return existing;
+    }
+    return () =>
+      Promise.reject(
+        new Error(
+          `yuzic-engine: ${property}() is not implemented on ${Platform.OS}. ` +
+            `It exists in the AudioEngine interface, but this platform's native ` +
+            `module does not export it.`
+        )
+      );
   },
 }) as AudioEngine;
