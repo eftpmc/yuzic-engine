@@ -84,6 +84,12 @@ public final class PlaybackEngine {
   private var publishedPosition: Double?
   private var publishedAt: Date?
 
+  private var observers: [NSObjectProtocol] = []
+
+  /// Set while an interruption is in force, so `.ended` only resumes playback
+  /// that *this* engine paused — not playback the user had already stopped.
+  private var pausedByInterruption = false
+
   /// Injectable so the listened-time tests do not have to sleep.
   private let now: () -> Date
 
@@ -119,6 +125,7 @@ public final class PlaybackEngine {
     self.nowPlaying = nowPlaying
     self.now = now
     wireRemoteCommands()
+    observeTheSystem()
   }
 
   /// The lock screen, Control Centre, headphone buttons and the car all arrive
@@ -194,7 +201,153 @@ public final class PlaybackEngine {
     )
   }
 
-  deinit { ticker?.invalidate() }
+  deinit {
+    ticker?.invalidate()
+    observers.forEach(NotificationCenter.default.removeObserver)
+  }
+
+  // MARK: - The system taking the audio away
+
+  /**
+   Three things the system does to a running audio graph, none of which it
+   asks permission for.
+
+   None of these were observed. `handleConfigurationChange` existed, documented
+   exactly this, and had no callers — so when another app took the route, iOS
+   stopped the engine underneath us and this one carried on scheduling into a
+   dead graph. Somebody's partner starting Spotify in the car is enough.
+   */
+  private func observeTheSystem() {
+    let centre = NotificationCenter.default
+
+    // The engine is stopped and every scheduled buffer is discarded. Fires on
+    // any route change — CarPlay connecting, AirPods, a dock — and there is no
+    // way to recover the buffers, so playback has to be rebuilt from where it
+    // had reached.
+    observers.append(centre.addObserver(
+      forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main
+    ) { [weak self] _ in
+      self?.rebuildAfterConfigurationChange()
+    })
+
+    // `AVAudioSession` is iOS-only, and this package also builds for macOS so
+    // the logic can be tested without a device. The configuration-change
+    // notification above exists on both.
+    #if os(iOS) || os(tvOS)
+    // Another app has taken the session — a call, or Spotify on the same
+    // Bluetooth device.
+    observers.append(centre.addObserver(
+      forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+    ) { [weak self] note in
+      self?.handleInterruption(note)
+    })
+
+    // The output vanished. Unplugging headphones must pause rather than
+    // continue out of the speaker, which is the one route change with an
+    // obvious right answer.
+    observers.append(centre.addObserver(
+      forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
+    ) { [weak self] note in
+      guard let self,
+            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+            AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable
+      else { return }
+      self.pause()
+    })
+    #endif
+  }
+
+  /**
+   Whether an interruption ending should resume playback.
+
+   Pure, because the rule is the part worth pinning: resume only what this
+   engine paused, and only when the system says the interrupting app has
+   finished with the session. Resuming otherwise starts music in someone's ear
+   after a phone call they took while the player was already stopped.
+   */
+  static func shouldResumeAfterInterruption(
+    wasPausedByUs: Bool, systemSaysResume: Bool
+  ) -> Bool {
+    wasPausedByUs && systemSaysResume
+  }
+
+  #if os(iOS) || os(tvOS)
+  private func handleInterruption(_ note: Notification) {
+    guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+          let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+
+    switch type {
+    case .began:
+      pausedByInterruption = state == .playing || state == .buffering
+      pause()
+    case .ended:
+      let options = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt)
+        .map(AVAudioSession.InterruptionOptions.init(rawValue:)) ?? []
+      let resume = Self.shouldResumeAfterInterruption(
+        wasPausedByUs: pausedByInterruption,
+        systemSaysResume: options.contains(.shouldResume)
+      )
+      pausedByInterruption = false
+      if resume {
+        // The session was deactivated under us; it has to be reclaimed before
+        // the graph will run again.
+        try? AVAudioSession.sharedInstance().setActive(true)
+        try? play()
+      }
+    @unknown default:
+      break
+    }
+  }
+
+  #endif
+
+  /**
+   Put playback back together after the system tore the graph down.
+
+   The position is read *before* anything is rebuilt, because restarting the
+   engine is what makes it unreadable. Everything else is the ordinary start
+   path: a fresh `TrackPlayback` over the same reader, seeking to where the
+   listener actually was.
+   */
+  private func rebuildAfterConfigurationChange() {
+    guard let playback = activePlayback, let reader = activeReader, reader.sampleRate > 0 else {
+      return
+    }
+    let frame = playback.currentFrame
+    let resume = state == .playing || state == .buffering
+
+    playback.stopAndWait()
+
+    do {
+      try graph.handleConfigurationChange()
+      graph.reconnect(graph.activeVoice, toSourceRate: reader.sampleRate)
+
+      let fresh = TrackPlayback(reader: reader, voice: graph.activeVoice)
+      fresh.onEndOfTrack = { [weak self, weak fresh] in self?.handleTrackFinished(fresh) }
+      fresh.onFirstBufferScheduled = { [weak self, weak fresh] in
+        DispatchQueue.main.async {
+          guard let self, self.activePlayback === fresh, self.state == .buffering else { return }
+          self.state = .playing
+          self.publishNowPlaying()
+        }
+      }
+      activePlayback = fresh
+      graph.cut(graph.activeVoice, to: 1)
+
+      if resume {
+        state = .buffering
+        try fresh.start(atFrame: frame)
+      } else {
+        // Rebuilt but left where it was: a route change while paused should
+        // not start the music.
+        try fresh.start(atFrame: frame)
+        fresh.pause()
+      }
+      publishNowPlaying()
+    } catch {
+      emit(.failed("audio graph could not be rebuilt after a route change: \(error)"))
+    }
+  }
 
   // MARK: - Transport
 

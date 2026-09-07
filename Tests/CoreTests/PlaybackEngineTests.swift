@@ -131,6 +131,38 @@ final class PlaybackEngineTests: XCTestCase {
     )
   }
 
+  // MARK: - The system taking the audio away
+
+  /**
+   Resuming after an interruption, which is only ever conditional.
+
+   Two things have to be true: the system has to say the interrupting app is
+   finished with the session, and the pause has to have been *ours*. Resuming
+   playback the listener had already stopped — because a call arrived while
+   the player sat paused — starts music in someone's ear for no reason.
+
+   The wiring around this cannot be tested without a device; the rule can, and
+   the rule is the part that is easy to get wrong.
+   */
+  func testResumesOnlyWhatItPausedItself() {
+    XCTAssertTrue(PlaybackEngine.shouldResumeAfterInterruption(
+      wasPausedByUs: true, systemSaysResume: true))
+  }
+
+  func testDoesNotResumePlaybackTheListenerHadAlreadyStopped() {
+    XCTAssertFalse(PlaybackEngine.shouldResumeAfterInterruption(
+      wasPausedByUs: false, systemSaysResume: true))
+  }
+
+  /// The system withholding `.shouldResume` is a decision, not an omission —
+  /// it is how it says another app is still using the session.
+  func testDoesNotResumeWhenTheSystemSaysNotTo() {
+    XCTAssertFalse(PlaybackEngine.shouldResumeAfterInterruption(
+      wasPausedByUs: true, systemSaysResume: false))
+    XCTAssertFalse(PlaybackEngine.shouldResumeAfterInterruption(
+      wasPausedByUs: false, systemSaysResume: false))
+  }
+
   func testPlayingOpensTheTrackAtTheStartIndex() throws {
     let (engine, factory, _) = try makeEngine()
     engine.setQueue([song("a"), song("b"), song("c")], startIndex: 1)
