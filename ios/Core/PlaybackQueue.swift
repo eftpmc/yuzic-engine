@@ -115,6 +115,27 @@ public final class PlaybackQueue {
     }
   }
 
+  /**
+   Where a *user-initiated* next lands, which is not always where an automatic
+   advance lands.
+
+   `nextIndex` answers "what plays when this track ends", and under `.one` that
+   is this track again. A person pressing next has asked to leave it, so a skip
+   advances instead. Under `.all` both wrap, and that is the case this exists
+   for: `activeIndex + 1` on the last track is out of range, which the engine
+   reads as the queue finishing — so the same queue in the same repeat mode
+   wrapped when the track ended by itself and stopped when the user pressed
+   next.
+
+   Under `.off` this deliberately returns an index past the end on the last
+   track, because finishing is what should happen there.
+   */
+  public var skipNextIndex: Int {
+    guard !tracks.isEmpty else { return 0 }
+    let next = activeIndex + 1
+    return repeatMode == .all ? next % tracks.count : next
+  }
+
   public var nextTrack: Track? {
     guard let next = nextIndex, tracks.indices.contains(next) else { return nil }
     return tracks[next]

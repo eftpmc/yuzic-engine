@@ -428,7 +428,11 @@ public final class PlaybackEngine {
   }
 
   public func skipToNext() throws {
-    try move(to: queue.activeIndex + 1, userInitiated: true)
+    // Through the queue, so that repeat is honoured here the same way the
+    // automatic advance honours it. Computing `activeIndex + 1` here meant a
+    // repeat-all queue wrapped when a track ended and stopped when the user
+    // pressed next.
+    try move(to: queue.skipNextIndex, userInitiated: true)
   }
 
   public func skipToPrevious() throws {

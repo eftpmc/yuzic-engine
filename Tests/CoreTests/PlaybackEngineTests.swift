@@ -40,6 +40,53 @@ final class PlaybackEngineTests: XCTestCase {
     XCTAssertTrue(PlaybackEngine.shouldBeginTransition(positionSec: 0, durationSec: 5, transitionSec: 10))
   }
 
+  // MARK: - Repeat and the user's own skip
+
+  /**
+   A user skip obeys repeat, the same as an automatic advance does.
+
+   `nextIndex` is where the queue's repeat rules live: under `.all` it wraps
+   with `(activeIndex + 1) % count`. The automatic advance asks it. `skipToNext`
+   did not — it computed `activeIndex + 1` directly, which on the last track is
+   out of range, and `move` reads an index past the end as "the queue is
+   finished" and stops playback.
+
+   So the same queue, on the same track, in the same repeat mode, wrapped when
+   the track ended by itself and stopped the music when the user pressed next.
+   Android already asked `nextIndex` here; this is iOS catching up.
+   */
+  func testSkipToNextWrapsUnderRepeatAll() throws {
+    let (engine, _, _) = try makeEngine()
+    engine.setQueue([song("a"), song("b")], startIndex: 1)
+    engine.queue.repeatMode = .all
+    try engine.play()
+
+    try engine.skipToNext()
+
+    XCTAssertEqual(engine.queue.activeIndex, 0, "next on the last track should wrap to the first")
+    XCTAssertNotEqual(engine.state, .idle, "wrapping should keep playing, not finish")
+  }
+
+  /**
+   Repeat-one is deliberately not wrapped onto a user skip.
+
+   `nextIndex` under `.one` returns the *current* index, because that is what
+   should play when this track ends. A person pressing next has asked to leave
+   this track, so the skip advances rather than replaying it — the two callers
+   want different answers from the same repeat mode, and that is why the skip
+   cannot simply delegate to `nextIndex` in every case.
+   */
+  func testSkipToNextUnderRepeatOneStillAdvances() throws {
+    let (engine, _, _) = try makeEngine()
+    engine.setQueue([song("a"), song("b")], startIndex: 0)
+    engine.queue.repeatMode = .one
+    try engine.play()
+
+    try engine.skipToNext()
+
+    XCTAssertEqual(engine.queue.activeIndex, 1, "a person pressing next wants the next track, not this one again")
+  }
+
   // MARK: - Queue movement, driven through the real graph
 
   /// Hands out readers over an in-memory WAV, so the engine can be driven with
