@@ -100,7 +100,17 @@ public final class PlaybackEngine {
    can draw.
    */
   public var remoteCommands: [RemoteCommand] = [.playPause, .next, .previous, .seek] {
-    didSet { if remoteCommands != oldValue { wireRemoteCommands() } }
+    // Re-wired on every set, not only when the list changes. The guard that
+    // used to be here read as free — re-registering the same commands is a
+    // no-op — but it assumed this engine is the only thing touching
+    // `MPRemoteCommandCenter.shared()`, and during the migration off
+    // @rntp/player it is not: that library's `destroy()` calls
+    // `removeTarget(nil)` on every command, which removes *everyone's*
+    // targets. Setting the same list again is then the host's only way to say
+    // "put mine back", and the guard turned that into nothing. The symptom is
+    // controls greyed out on the lock screen while the now-playing info still
+    // updates, because the info centre is a different singleton and survives.
+    didSet { wireRemoteCommands() }
   }
 
   private func wireRemoteCommands() {
