@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -52,6 +53,9 @@ class YuzicEngineModule : Module() {
     AsyncFunction("setup") { options: SetupOptions? ->
       configureAudioSession(options?.pauseOnBecomingNoisy ?: true)
       PlaybackService.eventSink = { name, body -> sendEvent(name, body) }
+      // The session's transport buttons need the engine, not the timeline.
+      PlaybackService.onSkipToNext = { skipToNextTrack() }
+      PlaybackService.onSkipToPrevious = { skipToPreviousTrack() }
       // Honoured, unlike on iOS, which declares the same field and then ticks
       // at a hardcoded 250ms regardless. Worth not copying: the host asked.
       progressIntervalMs = (options?.progressIntervalMs ?: 1000).coerceAtLeast(100).toLong()
@@ -63,6 +67,8 @@ class YuzicEngineModule : Module() {
       // the session may still fire — and sending an event into a JS context
       // that is being torn down is a crash rather than a no-op.
       PlaybackService.eventSink = null
+      PlaybackService.onSkipToNext = null
+      PlaybackService.onSkipToPrevious = null
       onMain { stopObserving() }
       sleepTimer.cancel()
       controllerFuture?.let { MediaController.releaseFuture(it) }
@@ -79,14 +85,16 @@ class YuzicEngineModule : Module() {
     AsyncFunction("setQueue") { tracks: List<TrackRecord>, startIndex: Int? ->
       queue.set(tracks, startIndex ?: 0)
       tracks.forEach { TrackHeaders.register(it.uri, it.headers) }
-      pushQueueToPlayer()
+      cancelTransition()
+      loadActiveTrack()
       sendEvent("onQueueChange", emptyMap<String, Any?>())
     }
 
     AsyncFunction("append") { tracks: List<TrackRecord> ->
       queue.append(tracks)
       tracks.forEach { TrackHeaders.register(it.uri, it.headers) }
-      pushQueueToPlayer()
+      // No player call. The voice holds only the track being played, so
+      // appending changes what happens *next* and nothing that is happening.
       sendEvent("onQueueChange", emptyMap<String, Any?>())
     }
 
@@ -107,10 +115,6 @@ class YuzicEngineModule : Module() {
         val at = index.coerceIn(0, queue.tracks.size)
         queue.insert(tracks, at)
         tracks.forEach { TrackHeaders.register(it.uri, it.headers) }
-        onMain {
-          PlaybackService.graph?.activeVoice?.player
-            ?.addMediaItems(at, tracks.map { it.toMediaItem() })
-        }
         sendEvent("onQueueChange", emptyMap<String, Any?>())
       }
     }
@@ -118,7 +122,6 @@ class YuzicEngineModule : Module() {
     AsyncFunction("removeAt") { index: Int ->
       if (index in queue.tracks.indices) {
         queue.remove(index)
-        onMain { PlaybackService.graph?.activeVoice?.player?.removeMediaItem(index) }
         sendEvent("onQueueChange", emptyMap<String, Any?>())
       }
     }
@@ -128,7 +131,6 @@ class YuzicEngineModule : Module() {
         val destination = to.coerceIn(0, queue.tracks.size - 1)
         if (from != destination) {
           queue.move(from, destination)
-          onMain { PlaybackService.graph?.activeVoice?.player?.moveMediaItem(from, destination) }
           sendEvent("onQueueChange", emptyMap<String, Any?>())
         }
       }
@@ -136,6 +138,7 @@ class YuzicEngineModule : Module() {
 
     AsyncFunction("clearQueue") {
       queue.clear()
+      cancelTransition()
       onMain { PlaybackService.graph?.activeVoice?.player?.clearMediaItems() }
       TrackHeaders.clear()
       sendEvent("onQueueChange", emptyMap<String, Any?>())
@@ -168,13 +171,16 @@ class YuzicEngineModule : Module() {
 
     // MARK: transport
     //
-    // Everything here goes through the *active voice's* ExoPlayer, which is
-    // holding the whole queue — see `pushQueueToPlayer`. So skipping and seeking
-    // are Media3's own timeline operations rather than anything this engine has
-    // to arrange, which is the half of §1's bill Android does not have to pay.
+    // Play, pause and seek go through the *active voice's* ExoPlayer, which
+    // holds exactly one track. Next and previous do not: with a one-item
+    // timeline there is nothing for Media3 to seek to, so they ask the engine,
+    // which is where the queue is — the same route the media session's own
+    // buttons take, so a lock screen and the app cannot disagree about what
+    // "next" means.
     //
-    // All of it via `onPlayer`, because a player may only be touched on the
-    // thread that built it and an `AsyncFunction` body is not that thread.
+    // All of it via `onPlayer`/`onMain`, because a player may only be touched
+    // on the thread that built it and an `AsyncFunction` body is not that
+    // thread.
 
     AsyncFunction("play") { onPlayer { it.play() } }
     AsyncFunction("pause") { onPlayer { it.pause() } }
@@ -184,12 +190,7 @@ class YuzicEngineModule : Module() {
       onPlayer { it.seekTo((positionSec * 1000).toLong()) }
     }
 
-    AsyncFunction("skipToNext") {
-      onPlayer {
-        it.seekToNextMediaItem()
-        syncActiveIndexFrom(it)
-      }
-    }
+    AsyncFunction("skipToNext") { skipToNextTrack() }
 
     AsyncFunction("skipToPrevious") {
       // Media3's own "previous" rewinds to the head of the current track first
@@ -197,17 +198,14 @@ class YuzicEngineModule : Module() {
       // button is expected to do. Deliberately not overridden to always change
       // track: that would be this engine disagreeing with every other player on
       // the device.
-      onPlayer {
-        it.seekToPreviousMediaItem()
-        syncActiveIndexFrom(it)
-      }
+      skipToPreviousTrack()
     }
 
     AsyncFunction("skipToIndex") { index: Int ->
-      onPlayer {
+      onMain {
         if (index in queue.tracks.indices) {
-          it.seekTo(index, 0L)
-          syncActiveIndexFrom(it)
+          cancelTransition()
+          advanceTo(index, listenedSeconds())
         }
       }
     }
@@ -550,15 +548,44 @@ class YuzicEngineModule : Module() {
   private var listeningSinceMillis: Long = 0
   private var observing = false
 
+  private var lastProgressEmitMillis: Long = 0
+
+  /**
+   * One timer, two rates.
+   *
+   * It runs at a fixed 250ms because that is what deciding when to start a
+   * crossfade needs — the fade should begin within a frame or so of its mark.
+   * `onProgress` is emitted at `progressIntervalMs`, which is a *display*
+   * setting and stays honoured. Running the whole thing at the display rate
+   * would be cheaper and wrong: a host that asked for progress once every five
+   * seconds would silently get its crossfades up to five seconds late, which is
+   * a setting about a progress bar changing what the audio does.
+   */
   private val ticker = object : Runnable {
     override fun run() {
-      emitProgress()
-      main.postDelayed(this, progressIntervalMs)
+      val now = System.currentTimeMillis()
+      if (now - lastProgressEmitMillis >= progressIntervalMs) {
+        lastProgressEmitMillis = now
+        emitProgress()
+      }
+      maybeBeginTransition()
+      main.postDelayed(this, TICK_INTERVAL_MS)
     }
   }
 
   private val playerListener = object : Player.Listener {
-    override fun onPlaybackStateChanged(state: Int) = emitStateIfChanged()
+    override fun onPlaybackStateChanged(state: Int) {
+      emitStateIfChanged()
+      if (state != Player.STATE_ENDED) return
+      // Identity, not timing. This listener is on both voices, and an outgoing
+      // voice reaching its own natural end during the second half of a fade is
+      // not the current track finishing — advancing on it is the double-advance
+      // iOS hit, in the shape Android grows it in. Asking whether the *active*
+      // voice is the one that ended holds whatever the timing.
+      val graph = PlaybackService.graph ?: return
+      if (graph.activeVoice.player.playbackState != Player.STATE_ENDED) return
+      handleTrackFinished()
+    }
 
     /**
      * Open or close the listening stretch as audio starts and stops.
@@ -575,33 +602,6 @@ class YuzicEngineModule : Module() {
       emitStateIfChanged()
     }
     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = emitStateIfChanged()
-
-    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-      // A queue being loaded is not a track change. Media3 fires this with
-      // PLAYLIST_CHANGED when `setMediaItems` first takes a queue, so without
-      // this every `setQueue` announces a change to index 0 carrying a
-      // `previousListenedSec` measured from a track nobody played.
-      //
-      // `_SEEK` is deliberately left alone. A seek across an item boundary
-      // does change the item, so callers that track "what is playing" need it;
-      // it is not an *advance*, so `previousListenedSec` means something
-      // different there. Suppressing it would be a second bug rather than a
-      // fix for this one.
-      if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) return
-      val player = PlaybackService.graph?.activeVoice?.player ?: return
-      syncActiveIndexFrom(player)
-      // Before the payload is built, because the new track's loudness has to be
-      // right from its first sample rather than corrected once it is audible.
-      applyVolume()
-
-      val listened = listenedSeconds()
-      resetListened()
-
-      val payload = mutableMapOf<String, Any?>("index" to player.currentMediaItemIndex)
-      mediaItem?.mediaId?.let { payload["id"] = it }
-      listened?.let { payload["previousListenedSec"] = it }
-      sendEvent("onTrackChange", payload)
-    }
 
     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
       sendEvent(
@@ -631,7 +631,8 @@ class YuzicEngineModule : Module() {
     // took to press play. The clock starts when audio does, in
     // `onIsPlayingChanged`.
     resetListened()
-    main.postDelayed(ticker, progressIntervalMs)
+    lastProgressEmitMillis = 0
+    main.postDelayed(ticker, TICK_INTERVAL_MS)
   }
 
   /** True while either voice is producing audio. Main thread only. */
@@ -710,25 +711,27 @@ class YuzicEngineModule : Module() {
   }
 
   /**
-   * Push `user volume × the active track's replay gain` to both players.
+   * Push `user volume × replay gain` to both voices, each for its own track.
    *
    * Both, because during a crossfade two of them are audible and leaving one
-   * behind makes the change lurch halfway through the fade. Main thread only.
+   * behind makes the change lurch halfway through the fade. Each for its own
+   * track, because the two rarely share a gain. Main thread only.
    */
   private fun applyVolume() {
     val graph = PlaybackService.graph ?: return
-    val track = queue.activeTrack
-    val gain = if (track == null) 1.0f else ReplayGain.linearGain(track, replayGain)
-    val level = userVolume * gain
-    graph.voiceA.player.volume = level
-    graph.voiceB.player.volume = level
+    applyVolumeTo(graph.activeVoice, queue.activeTrack)
+    // The idle voice carries the incoming track during a fade, and two tracks
+    // rarely share a replay gain. Setting both from the active track — correct
+    // while only one voice was ever audible — would apply the outgoing track's
+    // correction to the incoming one for the whole overlap, which is the error
+    // replay gain exists to remove.
+    applyVolumeTo(graph.idleVoice, incomingTrack)
   }
 
-  private fun syncActiveIndexFrom(player: ExoPlayer) {
-    val index = player.currentMediaItemIndex
-    if (index in queue.tracks.indices && index != queue.activeIndex) {
-      queue.set(queue.tracks, index)
-    }
+  /** One voice, corrected for the track *that voice* is carrying. */
+  private fun applyVolumeTo(voice: AudioGraph.Voice, track: TrackRecord?) {
+    val gain = if (track == null) 1.0f else ReplayGain.linearGain(track, replayGain)
+    voice.player.volume = userVolume * gain
   }
 
   /**
@@ -776,24 +779,206 @@ class YuzicEngineModule : Module() {
     controllerFuture = MediaController.Builder(context, token).buildAsync()
   }
 
-  /**
-   * Hand the queue to the foreground voice.
-   *
-   * Only the foreground one. The idle voice is loaded with a single item during
-   * the preload window and exists to overlap, so giving it the whole timeline
-   * would have it advancing through the queue in parallel — two playheads on the
-   * same list, which is not what the pair is for.
-   */
-  private fun pushQueueToPlayer() = onMain {
+  private fun loadActiveTrack(positionMs: Long = 0L, play: Boolean = true) = onMain {
     val graph = PlaybackService.graph ?: return@onMain
+    val track = queue.activeTrack ?: return@onMain
     val player = graph.activeVoice.player
-    player.setMediaItems(queue.tracks.map { it.toMediaItem() }, queue.activeIndex, 0L)
+    player.setMediaItem(track.toMediaItem(), positionMs)
     player.prepare()
     // The active track changed, so its replay gain did too. Set before anything
     // is audible rather than after: a track arriving at the wrong loudness and
     // being corrected a moment later is exactly what the feature is meant to
     // prevent.
     applyVolume()
+    if (play) player.play()
+  }
+
+  // MARK: - Advancing, and the overlap
+  //
+  // Every advance is the engine's decision. Media3 is told not to advance by
+  // itself (`setPauseAtEndOfMediaItems`), each voice holds one track, and what
+  // follows it is chosen here — cut or fade, honouring repeat.
+
+  private var transitioning = false
+  private var incomingTrack: TrackRecord? = null
+
+  /**
+   * Which transition a scheduled crossover belongs to.
+   *
+   * The crossover is a delayed runnable and cannot be unposted from everywhere
+   * that cancels a fade, so it checks that the transition it was scheduled for
+   * is still the current one. A bare boolean would let a *new* fade's flag
+   * satisfy an *old* fade's runnable, which is the same identity mistake as
+   * advancing on the wrong voice.
+   */
+  private var transitionToken = 0
+
+  private fun maybeBeginTransition() {
+    if (transitioning) return
+    val graph = PlaybackService.graph ?: return
+    val player = graph.activeVoice.player
+    if (!player.isPlaying) return
+    val fade = queue.transitionDuration(userInitiated = false)
+    val duration = player.duration
+    if (duration == C.TIME_UNSET || duration <= 0) return
+    if (!shouldBeginTransition(player.currentPosition / 1000.0, duration / 1000.0, fade)) return
+    beginTransition(fade)
+  }
+
+  /**
+   * Start the overlap: the next track begins on the idle voice while this one
+   * is still audible, and the pair cross at the midpoint.
+   */
+  private fun beginTransition(durationSec: Double) {
+    val graph = PlaybackService.graph ?: return
+    val nextIndex = queue.nextIndex ?: return
+    val next = queue.tracks.getOrNull(nextIndex) ?: return
+
+    transitioning = true
+    transitionToken += 1
+    val token = transitionToken
+    incomingTrack = next
+
+    val incoming = graph.idleVoice
+    val outgoing = graph.activeVoice
+    TrackHeaders.register(next.uri, next.headers)
+    incoming.player.setMediaItem(next.toMediaItem(), 0L)
+    incoming.player.prepare()
+    // Before the fade begins rather than at the crossover: a track arriving at
+    // the wrong loudness and being corrected halfway through the overlap is
+    // audible in exactly the way replay gain exists to prevent.
+    applyVolumeTo(incoming, next)
+    graph.ramp(incoming, 1f, durationSec, AudioGraph.FadeCurve.EQUAL_POWER)
+    graph.ramp(outgoing, 0f, durationSec, AudioGraph.FadeCurve.EQUAL_POWER)
+    incoming.player.play()
+
+    val listened = listenedSeconds()
+    val halfMillis = (durationSec / 2.0 * 1000).toLong()
+
+    // Halfway through is when the incoming track becomes the one being heard,
+    // so that is when it becomes the one being reported.
+    main.postDelayed({
+      if (token != transitionToken) return@postDelayed
+      graph.swapVoices()
+      queue.set(queue.tracks, nextIndex)
+      incomingTrack = null
+      transitioning = false
+      // The incoming track has been audible since the fade began, half a fade
+      // ago, so it starts with that much already listened rather than at zero.
+      listenedAccumulatedMillis = halfMillis
+      listeningSinceMillis = if (anyVoicePlaying()) System.currentTimeMillis() else 0L
+      applyVolume()
+      sendEvent(
+        "onTrackChange",
+        mapOf("index" to nextIndex, "id" to next.id, "previousListenedSec" to listened),
+      )
+    }, halfMillis)
+
+    // The outgoing voice stops at the *end* of the fade, not at the crossover.
+    // Stopping it at the midpoint cuts its own fade-out dead at the halfway
+    // gain — equal power puts that at 0.707, so the track would drop abruptly
+    // from about three-quarters volume instead of fading away. It also strands
+    // the ramp: the gain never reaches zero, and this voice is the *incoming*
+    // one next time, which would then start audible at 0.707 rather than
+    // rising from silence.
+    main.postDelayed({
+      if (token != transitionToken) return@postDelayed
+      outgoing.player.stop()
+    }, (durationSec * 1000).toLong())
+  }
+
+  /**
+   * Next and previous, shared by the JS surface and the media session.
+   *
+   * Both spellings reach the same code because they are the same intent: the
+   * host asking for another track. Routing the session's buttons somewhere
+   * else is how a lock screen and an app end up disagreeing about what
+   * "next" means.
+   */
+  private fun skipToNextTrack() = onMain {
+    // A skip is `userInitiated`, so `transitionDuration` gives zero and the
+    // change is a cut: a fade is for a track that ended, and eight seconds of
+    // politeness after a button press reads as lag.
+    cancelTransition()
+    queue.nextIndex?.let { advanceTo(it, listenedSeconds()) }
+  }
+
+  private fun skipToPreviousTrack() = onMain {
+    val player = PlaybackService.graph?.activeVoice?.player ?: return@onMain
+    cancelTransition()
+    if (player.currentPosition > PREVIOUS_RESTARTS_AFTER_MS || queue.activeIndex == 0) {
+      player.seekTo(0L)
+    } else {
+      advanceTo(queue.activeIndex - 1, listenedSeconds())
+    }
+  }
+
+  /** Abandon a fade in progress and put both voices back where they were. */
+  private fun cancelTransition() = onMain {
+    if (!transitioning) return@onMain
+    transitioning = false
+    transitionToken += 1
+    incomingTrack = null
+    val graph = PlaybackService.graph ?: return@onMain
+    graph.idleVoice.player.stop()
+    graph.ramp(graph.idleVoice, 0f, 0.0, AudioGraph.FadeCurve.LINEAR)
+    graph.ramp(graph.activeVoice, 1f, 0.0, AudioGraph.FadeCurve.LINEAR)
+  }
+
+  /**
+   * The active track reached its end without a fade having taken over.
+   *
+   * Asks the queue for what follows rather than adding one, so repeat is
+   * honoured in the one place it has to be: `one` returns the same index and
+   * the track starts again, `all` wraps instead of finishing.
+   */
+  private fun handleTrackFinished() {
+    if (transitioning) return
+    val listened = listenedSeconds()
+    val next = queue.nextIndex ?: return
+    advanceTo(next, listened)
+  }
+
+  /** Make `index` the active track and start it, reporting what came before. */
+  private fun advanceTo(index: Int, previousListenedSec: Double?) {
+    val track = queue.tracks.getOrNull(index) ?: return
+    queue.set(queue.tracks, index)
+    resetListened()
+    loadActiveTrack()
+    sendEvent(
+      "onTrackChange",
+      mapOf("index" to index, "id" to track.id, "previousListenedSec" to previousListenedSec),
+    )
+  }
+
+  companion object {
+    /**
+     * Whether it is time to start fading into the next track.
+     *
+     * Pure, and separated out for the same reason as its Swift counterpart:
+     * this is the one piece worth reading on its own, and everything around it
+     * is a clock. Kept identical to `PlaybackEngine.shouldBeginTransition`.
+     */
+    fun shouldBeginTransition(
+      positionSec: Double, durationSec: Double, transitionSec: Double,
+    ): Boolean {
+      if (transitionSec <= 0.0 || durationSec <= 0.0) return false
+      return positionSec >= durationSec - transitionSec
+    }
+
+    /**
+     * How far into a track "previous" restarts it rather than going back one.
+     * Matches what Media3's own `seekToPrevious` does, and what every other
+     * player on the device does, so the car's button behaves as expected.
+     */
+    private const val PREVIOUS_RESTARTS_AFTER_MS = 3000L
+
+    /**
+     * How often the engine looks at the playhead. Fast enough that a crossfade
+     * starts within a frame of its mark, cheap enough to leave running. Matches
+     * the 0.25s `PlaybackEngine` ticks at on iOS.
+     */
+    private const val TICK_INTERVAL_MS = 250L
   }
 }
 

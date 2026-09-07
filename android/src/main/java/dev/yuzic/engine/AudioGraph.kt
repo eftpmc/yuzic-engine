@@ -122,6 +122,15 @@ class AudioGraph(private val context: Context, private val httpClient: OkHttpCli
       .setHandleAudioBecomingNoisy(true)
       .build()
 
+    // Never advance on its own. Each voice holds exactly one track and the
+    // engine decides what follows it, because a crossfade needs the idle voice
+    // playing track N+1 while this one is still playing N — a player that
+    // advanced by itself would reach N+1 twice. Belt and braces given the
+    // single-item timeline, and deliberately so: this is the lever that stops
+    // Media3 doing behind the engine's back what `handleTrackFinished`'s
+    // identity check stops it doing in front.
+    player.setPauseAtEndOfMediaItems(true)
+
     return Voice(player, equalizer, fade)
   }
 

@@ -74,6 +74,23 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     var eventSink: ((String, Map<String, Any?>) -> Unit)? = null
 
+    /**
+     * Next and previous, handed back to the module.
+     *
+     * `seekToNext` walks the *player's* timeline, and each voice now holds
+     * exactly one track, so forwarding it would do nothing at all — the lock
+     * screen, the notification and the car's buttons would every one of them
+     * be dead. The queue lives in the engine, so the advance has to be asked
+     * of the engine. Null while no module is alive, which is the same
+     * condition `eventSink` is null under and means the same thing: the
+     * service is running without a JS context and must not pretend otherwise.
+     */
+    @Volatile
+    var onSkipToNext: (() -> Unit)? = null
+
+    @Volatile
+    var onSkipToPrevious: (() -> Unit)? = null
+
     private const val BROWSE_ROOT_ID = "yuzic:root"
 
     /**
@@ -386,7 +403,51 @@ private class EnginePlayer(private val graph: AudioGraph) :
     graph.voiceB.player.stop()
   }
 
-  override fun getAvailableCommands(): Player.Commands = active.availableCommands
+  // Next and previous do not walk the timeline any more, because there is no
+  // timeline to walk: one track per voice. They ask the engine, which is where
+  // the queue actually is. Both spellings are overridden because Media3 picks
+  // between them by which commands the session advertises, and a controller
+  // that chose the other one would silently do nothing.
+  override fun seekToNext() = askEngineToSkipNext()
+
+  override fun seekToNextMediaItem() = askEngineToSkipNext()
+
+  override fun seekToPrevious() = askEngineToSkipPrevious()
+
+  override fun seekToPreviousMediaItem() = askEngineToSkipPrevious()
+
+  private fun askEngineToSkipNext() {
+    PlaybackService.onSkipToNext?.invoke()
+  }
+
+  private fun askEngineToSkipPrevious() {
+    PlaybackService.onSkipToPrevious?.invoke()
+  }
+
+  /**
+   * The player's own commands, plus the two only the engine can answer.
+   *
+   * ExoPlayer decides `COMMAND_SEEK_TO_NEXT` by looking at its timeline, and
+   * each voice holds exactly one track — so it reports that there is nowhere to
+   * go, and a controller that believes it never sends the command at all. The
+   * override above would then never run: the button is not ignored, it is
+   * greyed out before it is pressed.
+   *
+   * Whether there is a next track is the *queue's* answer, not the player's,
+   * and `nextIndex` is the same call the engine itself advances on — so repeat
+   * is honoured here for free, and the lock screen stops offering "next" at the
+   * end of a queue that does not wrap.
+   */
+  override fun getAvailableCommands(): Player.Commands =
+    active.availableCommands.buildUpon()
+      .addIf(Player.COMMAND_SEEK_TO_NEXT, PlaybackService.queue.nextIndex != null)
+      .addIf(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM, PlaybackService.queue.nextIndex != null)
+      // Previous is always offered: below the restart threshold it goes back a
+      // track, above it it restarts this one, so it does something useful even
+      // on the first track of a queue.
+      .addIf(Player.COMMAND_SEEK_TO_PREVIOUS, true)
+      .addIf(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM, PlaybackService.queue.activeIndex > 0)
+      .build()
 
   override fun addListener(listener: Player.Listener) {
     // Both, because the session must keep hearing about state after a swap. The
