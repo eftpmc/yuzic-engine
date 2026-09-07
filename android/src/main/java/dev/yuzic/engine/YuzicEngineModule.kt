@@ -87,6 +87,14 @@ class YuzicEngineModule : Module() {
       tracks.forEach { TrackHeaders.register(it.uri, it.headers) }
       cancelTransition()
       loadActiveTrack()
+      // Unconditionally, because the interesting case is the empty one.
+      // `loadActiveTrack` returns early when there is no active track, so
+      // `setQueue(emptyList())` takes the queue from n tracks to none while
+      // calling no player method at all — and "next" would go on being
+      // advertised for a track that is no longer there. The non-empty case
+      // does not need this (the media item changes and the player says so),
+      // but over-calling is free and the exemption is the part that was wrong.
+      commandsMayHaveChanged()
       sendEvent("onQueueChange", emptyMap<String, Any?>())
     }
 
@@ -95,6 +103,9 @@ class YuzicEngineModule : Module() {
       tracks.forEach { TrackHeaders.register(it.uri, it.headers) }
       // No player call. The voice holds only the track being played, so
       // appending changes what happens *next* and nothing that is happening.
+      // Which is exactly why the session has to be told: "next" may have gone
+      // from impossible to possible and nothing else will mention it.
+      commandsMayHaveChanged()
       sendEvent("onQueueChange", emptyMap<String, Any?>())
     }
 
@@ -115,6 +126,7 @@ class YuzicEngineModule : Module() {
         val at = index.coerceIn(0, queue.tracks.size)
         queue.insert(tracks, at)
         tracks.forEach { TrackHeaders.register(it.uri, it.headers) }
+        commandsMayHaveChanged()
         sendEvent("onQueueChange", emptyMap<String, Any?>())
       }
     }
@@ -122,6 +134,7 @@ class YuzicEngineModule : Module() {
     AsyncFunction("removeAt") { index: Int ->
       if (index in queue.tracks.indices) {
         queue.remove(index)
+        commandsMayHaveChanged()
         sendEvent("onQueueChange", emptyMap<String, Any?>())
       }
     }
@@ -131,6 +144,7 @@ class YuzicEngineModule : Module() {
         val destination = to.coerceIn(0, queue.tracks.size - 1)
         if (from != destination) {
           queue.move(from, destination)
+          commandsMayHaveChanged()
           sendEvent("onQueueChange", emptyMap<String, Any?>())
         }
       }
@@ -141,6 +155,7 @@ class YuzicEngineModule : Module() {
       cancelTransition()
       onMain { PlaybackService.graph?.activeVoice?.player?.clearMediaItems() }
       TrackHeaders.clear()
+      commandsMayHaveChanged()
       sendEvent("onQueueChange", emptyMap<String, Any?>())
     }
 
@@ -167,6 +182,8 @@ class YuzicEngineModule : Module() {
           graph.voiceB.player.repeatMode = media3
         }
       }
+      // `all` gives the last track a next and `off` takes it away again.
+      commandsMayHaveChanged()
     }
 
     // MARK: transport
@@ -740,6 +757,18 @@ class YuzicEngineModule : Module() {
         "bufferedSec" to player.bufferedPosition.coerceAtLeast(0) / 1000.0,
       ),
     )
+  }
+
+  /**
+   * Tell the session the command set may have moved.
+   *
+   * Called after any queue change that does not touch the player, because those
+   * are exactly the ones nothing else will announce. Cheap, idempotent, and
+   * safe to over-call: it re-reads a set and hands it to listeners that compare
+   * before acting.
+   */
+  private fun commandsMayHaveChanged() = onMain {
+    PlaybackService.onCommandsMayHaveChanged?.invoke()
   }
 
   /**

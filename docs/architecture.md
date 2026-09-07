@@ -418,8 +418,8 @@ config plugin's Info.plist scene entry lands only on a prebuild.
 
 Not a design decision — a record. The serious defects here have kept arriving in
 the same shape, and it is worth naming because it is not the shape most review
-looks for. Nothing below threw. Nothing below failed a test suite. Six of the
-eight are code that ran, returned, and accomplished nothing. The other two are
+looks for. Nothing below threw. Nothing below failed a test suite. Seven of the
+nine are code that ran, returned, and accomplished nothing. The other two are
 the same idea one level up: one where what accomplished nothing was the
 handover, one where it was the API boundary.
 
@@ -446,6 +446,42 @@ no default, so the question has to be answered at every call site.
 useless if `getAvailableCommands` reports there is nowhere to go: the controller
 never sends the command and the override never runs. The button was not being
 ignored — it was disabled before it could be pressed.
+
+**A control advertised from state the announcing object cannot see.** Since the
+Android model port each voice holds exactly one track, so
+`getAvailableCommands` answers `COMMAND_SEEK_TO_NEXT` from `queue.nextIndex`
+rather than from the player's timeline — a timeline of one can never report
+that a next exists. But `ForwardingPlayer` passes listener registration
+straight through and keeps no record, so nothing could raise
+`onAvailableCommandsChanged` on the session's behalf. ExoPlayer announces its
+own commands when its timeline changes; ours can change when nothing about the
+player does. Appending behind the last track turns "next" from impossible into
+possible, and the player has no reason to mention it.
+
+The distinguishing detail is that it was *intermittent*, and that is the
+property that let it survive. During ordinary playback, unrelated player events
+fire often enough that the set is usually re-read within seconds — so it reaches
+a user as "sometimes the next button doesn't work", with no pattern they can
+see. Measured on device, the same probe on the same build gave one run that
+recovered at eleven seconds and one that was still greyed at thirty. A control
+that is wrong every time gets reported; a control that is wrong sometimes gets
+lived with.
+
+It is worth distinguishing from *a command greyed out before it can be sent*
+above, which looks identical from outside. There, the advertised value was
+wrong. Here, the value is right and nothing announces that it changed. Both
+produce a dead button and the fix is in a different place for each — which is
+why the thing that settled it was decoding the session's `actions` bitmask
+rather than looking at the button: bit 16 present and bit 32 absent said the
+override was running and the queue genuinely had nowhere to go, which was the
+correct answer to a question that had been asked of a one-track queue.
+
+The same blindness produces the opposite fault, and review caught that where the
+device run had not: `setQueue(emptyList())` takes the queue from n tracks to
+none while calling no player method at all, because `loadActiveTrack` returns
+early when there is no active track. Nothing is announced, and the session goes
+on advertising a next that is no longer there — lit when it should be greyed,
+where the original was greyed when it should be lit. One blindness, both signs.
 
 **A state announcing an event that has not happened.** The engine went to
 `.playing` when play was requested rather than when the first buffer was
@@ -475,7 +511,7 @@ meant nothing at all. It is the same shape as a function with no callers, moved
 out to the boundary between two codebases — where it is harder to see, because
 each side is complete and only the join is empty.
 
-The common thread is that all eight are invisible to "does it return, and is the
+The common thread is that all nine are invisible to "does it return, and is the
 return value right". What catches them is asking what the code *did* — which
 call ran, which caller reached it, what the user then heard. `Tools/mutate.py`
 automates one slice of this: break a real behaviour, and see whether any test
