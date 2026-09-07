@@ -341,6 +341,12 @@ That last cost is accepted rather than hidden. Someone who set a bitrate cap
 chose it, and a slower seek is the honest consequence — better than quietly
 pulling the lossless original over cellular to make seeking feel nicer.
 
+**Measured since: the cost is smaller than this paragraph assumes.** 333ms to
+first sample on the transcoded path against 273ms on a ranged one — a
+reconnection, a fresh stream and a rebuffer, for about sixty milliseconds. The
+trade-off stands, but "slower seek" overstates what a user would notice; see
+open question 3.
+
 `AudioFileReader` takes a `ByteSource` rather than either concrete type, so it
 does not know or care which transport it is reading.
 
@@ -424,13 +430,29 @@ go/no-go:
    Used only at the seek site; everywhere else the reader is discarded and the
    wait would buy nothing.
 
-   ~~Outstanding: time-to-first-sample.~~ **Done — 333ms**, on the simulator
-   against a real Navidrome over the open internet: playing at 4.4s with 11.1s
-   buffered, seek to 151.4s, first sample 333ms later. That is a seek far
-   outside anything fetched, answered in about a third of a second, so the
-   ranged-GET path costs roughly one round trip and a decode rather than a
-   rebuffer. Driven from yuzic's dev smoke test, which is where the number can
-   be re-taken.
+   ~~Outstanding: time-to-first-sample.~~ **Done, and both transports were
+   measured** — which turned out to matter, because the first run measured the
+   wrong one and was written up as the other.
+
+   On the simulator against a real Navidrome over the open internet, playing at
+   4.4s with 11.1s buffered, seeking to 151.4s:
+
+   | transport | first sample |
+   | --- | --- |
+   | direct, ranged (`format=raw`) | **273ms** |
+   | transcoded, 320k (`timeOffset` reconnect) | **333ms** |
+
+   So a seek far outside anything fetched costs about a round trip either way,
+   not a rebuffer — and §10's second transport, which has to throw away its
+   stream and reconnect, is only ~60ms worse than a ranged GET. That is a much
+   better result for the transcoded path than the design assumed when it called
+   the slower seek "the honest consequence" of a bitrate cap.
+
+   **The trap worth recording**: yuzic sends `format`/`maxBitRate` for every
+   quality *except* Original, so a probe written against the app's default
+   quality silently measures the transcoded path. The engine cannot tell you
+   which one you got — both are just a `ByteSource` by then. The smoke test now
+   has one row per transport and prints which it is using.
 
    Measuring it also caught a divergence the tests could not: `bufferedSec` is
    **absolute** — on the same timeline as the position — because that is what a
