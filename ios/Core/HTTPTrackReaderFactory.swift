@@ -17,11 +17,26 @@ import AudioToolbox
  */
 public final class HTTPTrackReaderFactory: TrackReaderFactory {
 
-  /// Bits per second assumed when a transcoding server will not say how long
-  /// its output is. Only used to answer `GetSizeProc` before the stream ends —
-  /// erring high is deliberate, since reading past the real end reads as
-  /// end-of-file while under-reporting truncates the track.
-  public static let assumedBitrate: Double = 320_000
+  /**
+   Bits per second assumed when a streaming server will not say how long its
+   output is. Only used to answer `GetSizeProc` before the stream ends.
+
+   Erring high is deliberate: reading past the real end reads as end-of-file,
+   while under-reporting truncates the track. **320 kbps did not err high.** It
+   is a ceiling for transcoded output and roughly a third of what a lossless
+   original actually costs — a CD-rate FLAC runs about 1100 kbps — so a
+   lossless track taken down this path was told it was three and a half times
+   smaller than it is. Measured on a real library: a 3:21 FLAC at 1105 kbps was
+   reported as 8 MB, which the parser read as a 58-second track, cutting it
+   short and starting a twelve-second crossfade at 46 seconds.
+
+   Set above lossless so the same mistake cannot be made by a format rather
+   than a bitrate. Over-reporting is now free: nothing derives a *duration*
+   from this any more — see `PlaybackEngine.referenceDuration`, which trusts
+   the host's metadata — so this number only has to be large enough that the
+   parser keeps reading until the bytes genuinely run out.
+   */
+  public static let assumedBitrate: Double = 5_000_000
 
   /**
    Where fetched audio is kept between tracks. Nil keeps the old behaviour —

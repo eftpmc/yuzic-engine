@@ -59,6 +59,39 @@ final class PlaybackEngineTests: XCTestCase {
     XCTAssertTrue(PlaybackEngine.shouldBeginTransition(positionSec: 188, durationSec: 200, transitionSec: 12))
   }
 
+  /**
+   The real case, with the real numbers.
+
+   Movements — *Pulse*, 3:21 of FLAC at 1105 kbps, streamed over cellular where
+   the forward-only path applies. The size handed to the parser was
+   `duration × assumedBitrate`, and 320 kbps is about a third of what lossless
+   costs — so 201.6s became 8 MB, which at the real byte rate reads as 58
+   seconds. A twelve-second crossfade then began at 46.
+   */
+  func testTheAlbumThatReportedThis() {
+    let declared = 201.6                     // Navidrome and the FLAC header agree
+    let readerThought = 8_064_000.0 / (1_105_000.0 / 8)   // ≈ 58.4s
+
+    let trusted = PlaybackEngine.referenceDuration(readerSec: readerThought, declaredSec: declared)
+    XCTAssertEqual(trusted, declared)
+
+    // Before: a fade beginning three quarters of the way through the track.
+    XCTAssertTrue(PlaybackEngine.shouldBeginTransition(
+      positionSec: 47, durationSec: readerThought, transitionSec: 12))
+    // After: nothing until the song is actually ending.
+    XCTAssertFalse(PlaybackEngine.shouldBeginTransition(
+      positionSec: 47, durationSec: trusted, transitionSec: 12))
+    XCTAssertTrue(PlaybackEngine.shouldBeginTransition(
+      positionSec: 190, durationSec: trusted, transitionSec: 12))
+  }
+
+  /// The assumption has to clear lossless, or the same fault returns by format.
+  func testTheAssumedBitrateClearsLossless() {
+    // A CD-rate FLAC is around 1100 kbps; 24/96 runs higher still.
+    XCTAssertGreaterThan(HTTPTrackReaderFactory.assumedBitrate, 1_411_000,
+                         "must exceed uncompressed CD audio, not just transcoded output")
+  }
+
   func testTheReaderWinsWhenTheTwoAgree() {
     // Exact for a local file, and already corrected for encoder padding, so a
     // small disagreement should not throw away the more precise number.

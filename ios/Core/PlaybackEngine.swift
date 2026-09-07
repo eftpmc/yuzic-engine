@@ -693,8 +693,16 @@ public final class PlaybackEngine {
     return (
       position,
       // A live stream has no finish line, and reporting the bytes fetched so
-      // far as a duration draws a progress bar that lies.
-      queue.activeTrack?.continuous == true ? 0 : Double(reader.totalFrames) / reader.sampleRate,
+      // far as a duration draws a progress bar that lies. Neither does a
+      // byte-derived length that disagrees with the host — see
+      // `referenceDuration`. The seek bar and the crossfade have to be reading
+      // the same clock, or the track ends somewhere the bar never reaches.
+      queue.activeTrack?.continuous == true
+        ? 0
+        : Self.referenceDuration(
+            readerSec: Double(reader.totalFrames) / reader.sampleRate,
+            declaredSec: queue.activeTrack?.durationSec
+          ),
       // Absolute, not relative: a buffering bar is drawn against the same
       // timeline as the position, so a figure measured from the playhead would
       // sit at the wrong end of it.
@@ -723,13 +731,9 @@ public final class PlaybackEngine {
 
     guard !transitioning else { return }
     let fade = queue.transitionDuration(userInitiated: false)
-    // Not `duration` — see `referenceDuration`. A byte-derived length from a
-    // transcoding server can be far short of the song, and deciding the fade
-    // from it crossfades out of the middle of a track.
-    let endsAt = Self.referenceDuration(
-      readerSec: duration, declaredSec: queue.activeTrack?.durationSec
-    )
-    guard Self.shouldBeginTransition(positionSec: position, durationSec: endsAt, transitionSec: fade) else {
+    // `duration` is already the trusted one — `progress` applies
+    // `referenceDuration` so the seek bar and the fade cannot disagree.
+    guard Self.shouldBeginTransition(positionSec: position, durationSec: duration, transitionSec: fade) else {
       return
     }
     beginTransition(over: fade)
