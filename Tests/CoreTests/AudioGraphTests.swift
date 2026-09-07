@@ -280,6 +280,25 @@ final class AudioGraphTests: XCTestCase {
     let after = rms(try graph.renderOffline(frames: 4096))
 
     XCTAssertEqual(after, before, accuracy: 0.02)
+
+    // The assertion the name promises, and the one the RMS check above cannot
+    // make: a flat parametric EQ sounds identical to a bypassed one, so
+    // comparing rendered audio proves the audio is unharmed and says nothing
+    // about whether the unit is in the chain. Found by deleting the bypass
+    // guard and watching the whole suite stay green.
+    XCTAssertTrue(graph.isEqualizerBypassed, "a flat equalizer was left in the chain")
+  }
+
+  /// And the other direction: a real curve must not be bypassed.
+  func testEqualizerIsEngagedWhenABandIsSet() throws {
+    let graph = AudioGraph()
+    try graph.startOffline()
+
+    graph.setEqualizer(bands: [(frequency: 1000, gainDb: 6, q: 1)])
+    XCTAssertFalse(graph.isEqualizerBypassed)
+
+    graph.setEqualizer(bands: [(frequency: 1000, gainDb: 0, q: 1)])
+    XCTAssertTrue(graph.isEqualizerBypassed, "a curve of all zeroes is flat")
   }
 
   func testEqualizerChangesTheSound() throws {

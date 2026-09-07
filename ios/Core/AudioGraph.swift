@@ -30,6 +30,17 @@ public final class AudioGraph {
 
   private let engine = AVAudioEngine()
   private let eq: AVAudioUnitEQ
+
+  /**
+   Whether the equalizer is currently out of the chain.
+   
+   Exposed for tests. Bypassing is an efficiency property, not an audible one:
+   a parametric EQ with every band at 0dB sounds identical to no EQ at all, so
+   comparing rendered audio cannot tell the two apart — which is exactly how
+   `testEqualizerIsBypassedWhenFlat` came to be named for something it could
+   not observe. This is the only thing that distinguishes them.
+   */
+  public var isEqualizerBypassed: Bool { eq.bypass }
   private let speed: AVAudioUnitTimePitch
   private var fadeTimers: [Int: Timer] = [:]
   public private(set) var voiceA: Voice
