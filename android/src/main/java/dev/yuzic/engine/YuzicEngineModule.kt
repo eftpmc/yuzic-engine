@@ -531,7 +531,20 @@ class YuzicEngineModule : Module() {
 
   private var progressIntervalMs: Long = 1000
   private var lastState: String? = null
-  private var trackStartedAtMillis: Long = 0
+  /**
+   * How long the current track has actually been audible.
+   *
+   * Two values rather than a start time, for the same two reasons the iOS
+   * engine keeps them (`PlaybackEngine.listenedAccumulated`): a start time
+   * measures wall clock, and a paused player is not listening. This figure is
+   * `previousListenedSec`, which hosts judge scrobble thresholds against, so
+   * counting a pause submits plays to Last.fm and ListenBrainz for music
+   * nobody heard.
+   *
+   * `listeningSinceMillis` is 0 while nothing is audible.
+   */
+  private var listenedAccumulatedMillis: Long = 0
+  private var listeningSinceMillis: Long = 0
   private var observing = false
 
   private val ticker = object : Runnable {
@@ -543,6 +556,21 @@ class YuzicEngineModule : Module() {
 
   private val playerListener = object : Player.Listener {
     override fun onPlaybackStateChanged(state: Int) = emitStateIfChanged()
+
+    /**
+     * Open or close the listening stretch as audio starts and stops.
+     *
+     * Asks whether *any* voice is playing rather than trusting this callback's
+     * own argument, because this listener is attached to both. During a
+     * crossfade the pair overlaps, and the outgoing voice reporting `false` at
+     * the end of a fade does not mean the listener stopped hearing anything —
+     * taking it at face value would stop the clock while the incoming track
+     * plays on.
+     */
+    override fun onIsPlayingChanged(isPlaying: Boolean) {
+      if (anyVoicePlaying()) openListeningStretch() else closeListeningStretch()
+      emitStateIfChanged()
+    }
     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = emitStateIfChanged()
 
     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -563,9 +591,8 @@ class YuzicEngineModule : Module() {
       // right from its first sample rather than corrected once it is audible.
       applyVolume()
 
-      val now = System.currentTimeMillis()
-      val listened = if (trackStartedAtMillis > 0) (now - trackStartedAtMillis) / 1000.0 else null
-      trackStartedAtMillis = now
+      val listened = listenedSeconds()
+      resetListened()
 
       val payload = mutableMapOf<String, Any?>("index" to player.currentMediaItemIndex)
       mediaItem?.mediaId?.let { payload["id"] = it }
@@ -594,8 +621,51 @@ class YuzicEngineModule : Module() {
     graph.voiceA.player.addListener(playerListener)
     graph.voiceB.player.addListener(playerListener)
     observing = true
-    trackStartedAtMillis = System.currentTimeMillis()
+    // Deliberately *not* started here. This used to set the origin at setup,
+    // so the first track change reported the time since the engine was set up
+    // rather than the time anyone spent listening — two runs of the same
+    // scenario reported 15.3s and 33.8s, which varied with how long the tester
+    // took to press play. The clock starts when audio does, in
+    // `onIsPlayingChanged`.
+    resetListened()
     main.postDelayed(ticker, progressIntervalMs)
+  }
+
+  /** True while either voice is producing audio. Main thread only. */
+  private fun anyVoicePlaying(): Boolean {
+    val graph = PlaybackService.graph ?: return false
+    return graph.voiceA.player.isPlaying || graph.voiceB.player.isPlaying
+  }
+
+  /** Start counting. Idempotent, so an already-open stretch is not restarted. */
+  private fun openListeningStretch() {
+    if (listeningSinceMillis == 0L) listeningSinceMillis = System.currentTimeMillis()
+  }
+
+  /** Bank the open stretch. Idempotent, so a second pause cannot count it twice. */
+  private fun closeListeningStretch() {
+    if (listeningSinceMillis == 0L) return
+    listenedAccumulatedMillis += System.currentTimeMillis() - listeningSinceMillis
+    listeningSinceMillis = 0L
+  }
+
+  /**
+   * Played seconds for the track that is ending, or null if it never played.
+   *
+   * Null rather than zero: a host cannot tell a track nobody heard from one
+   * heard for under half a second if both arrive as 0.0, and only one of those
+   * should ever be considered for a scrobble.
+   */
+  private fun listenedSeconds(): Double? {
+    val open = if (listeningSinceMillis > 0) System.currentTimeMillis() - listeningSinceMillis else 0L
+    val total = listenedAccumulatedMillis + open
+    return if (total > 0) total / 1000.0 else null
+  }
+
+  /** Zero the count for a new track, keeping the clock running if audio is. */
+  private fun resetListened() {
+    listenedAccumulatedMillis = 0
+    listeningSinceMillis = if (anyVoicePlaying()) System.currentTimeMillis() else 0L
   }
 
   private fun stopObserving() {
