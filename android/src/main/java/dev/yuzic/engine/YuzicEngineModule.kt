@@ -461,6 +461,17 @@ class YuzicEngineModule : Module() {
     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = emitStateIfChanged()
 
     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+      // A queue being loaded is not a track change. Media3 fires this with
+      // PLAYLIST_CHANGED when `setMediaItems` first takes a queue, so without
+      // this every `setQueue` announces a change to index 0 carrying a
+      // `previousListenedSec` measured from a track nobody played.
+      //
+      // `_SEEK` is deliberately left alone. A seek across an item boundary
+      // does change the item, so callers that track "what is playing" need it;
+      // it is not an *advance*, so `previousListenedSec` means something
+      // different there. Suppressing it would be a second bug rather than a
+      // fix for this one.
+      if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) return
       val player = PlaybackService.graph?.activeVoice?.player ?: return
       syncActiveIndexFrom(player)
       // Before the payload is built, because the new track's loudness has to be
