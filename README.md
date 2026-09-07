@@ -1,7 +1,7 @@
 # yuzic-engine
 
 An audio playback engine for React Native, built around an audio graph rather
-than a single player. Written for [yuzic](https://github.com/eftpmc/yuzic), a
+than a single player. Written for [yuzic](https://github.com/yuzicapp/yuzic), a
 self-hosted music client, and usable on its own.
 
 Apache-2.0. iOS and Android.

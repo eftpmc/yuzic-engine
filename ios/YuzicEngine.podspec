@@ -8,10 +8,10 @@ Pod::Spec.new do |s|
   s.summary        = package['description']
   s.license        = package['license']
   s.author         = 'yuzic contributors'
-  s.homepage       = 'https://github.com/eftpmc/yuzic-engine'
+  s.homepage       = 'https://github.com/yuzicapp/yuzic-engine'
   s.platforms      = { :ios => '15.1', :tvos => '15.1' }
   s.swift_version  = '5.9'
-  s.source         = { git: 'https://github.com/eftpmc/yuzic-engine.git' }
+  s.source         = { git: 'https://github.com/yuzicapp/yuzic-engine.git' }
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'
