@@ -4,6 +4,7 @@ import AVFoundation
 // decoder. In the pod everything is one module and these headers arrive
 // through the umbrella, so the imports would not resolve and are not needed.
 #if canImport(CVorbis)
+import COgg
 import CVorbis
 #endif
 

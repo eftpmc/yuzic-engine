@@ -77,15 +77,16 @@ that they do not, and this engine decodes itself:
 | | iOS | Android |
 | --- | --- | --- |
 | Ogg Vorbis | libvorbis, vendored | Media3 |
-| Ogg Opus | *(on a branch)* | Media3 |
+| Ogg Opus | libopus, vendored | Media3 |
 
-iOS has no Vorbis decoder at all — an `.ogg` cannot be opened by Core Audio, so
-the failure is total rather than a quality loss. For a self-hosted library
-stored as Vorbis that is the difference between working and not, so libogg and
-libvorbis are vendored under `ios/Vendor` (BSD-3, see NOTICE) and
-`VorbisFileReader` decodes them through the same cache and ranged requests as
-everything else. The decoder is chosen by reading the codec out of the first
-Ogg page, not by file extension — a stream URL does not have one.
+iOS has no decoder for either — an `.ogg` or `.opus` cannot be opened by Core
+Audio at all, so the failure is total rather than a quality loss. For a
+self-hosted library stored in one of them that is the difference between working
+and not, so libogg, libvorbis, libopus and libopusfile are vendored under
+`ios/Vendor` (BSD-3, see NOTICE) and decoded through the same cache and ranged
+requests as everything else. The decoder is chosen by reading the codec out of
+the identification packet in the first Ogg page, not by file extension — a
+stream URL does not have one.
 
 ## Platform state
 

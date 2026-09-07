@@ -46,10 +46,17 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
     // extension — `/rest/stream.view?id=…` is the same shape whatever the
     // file is — and a server may transcode on the way out, so the only honest
     // answer to "what is this" is the first four bytes.
-    if Self.isOggVorbis(source) {
+    switch Self.oggCodec(source) {
+    case .vorbis:
       let reader = VorbisFileReader(source: source)
       try reader.open()
       return reader
+    case .opus:
+      let reader = OpusFileReader(source: source)
+      try reader.open()
+      return reader
+    case nil:
+      break
     }
 
     let reader = AudioFileReader(source: source)
@@ -57,32 +64,44 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
     return reader
   }
 
+  /// The codecs the engine carries its own decoder for.
+  enum OggCodec { case vorbis, opus }
+
   /**
-   Whether this is Ogg *Vorbis*, rather than merely Ogg.
+   Which codec an Ogg stream carries, or nil for anything else.
 
-   The container is not enough. Ogg carries Opus and FLAC too, and both begin
-   with the same `OggS` capture pattern — so matching the container alone
-   would hand an Opus file to a Vorbis decoder, which fails with a header
-   error instead of being transcoded as it is today. The codec name sits in
-   the first page's body, a few bytes in, so identifying it costs the same
-   single read.
+   The container is not enough to choose by: Ogg holds Vorbis, Opus and FLAC
+   behind the same `OggS` capture pattern, and handing one decoder another's
+   stream fails with a header error rather than falling back. The codec name
+   sits in the first page's body, so identifying it costs the same single read
+   the container check did.
 
-   A source that cannot be read yet answers false and the Core Audio path is
+   FLAC-in-Ogg is deliberately not claimed. Core Audio decodes raw `.flac` and
+   this engine carries no FLAC decoder, so answering nil sends it down the
+   Core Audio path — which will fail on the Ogg wrapper, exactly as it does
+   today rather than newly.
+
+   A source that cannot be read yet answers nil and the Core Audio path is
    tried, which is what would have happened anyway.
    */
-  static func isOggVorbis(_ source: ByteSource) -> Bool {
+  static func oggCodec(_ source: ByteSource) -> OggCodec? {
     guard let head = try? source.read(offset: 0, count: 64), head.count >= 12 else {
-      return false
+      return nil
     }
     let bytes = [UInt8](head)
-    guard bytes.starts(with: [0x4F, 0x67, 0x67, 0x53]) else { return false }  // "OggS"
+    guard bytes.starts(with: [0x4F, 0x67, 0x67, 0x53]) else { return nil }  // "OggS"
 
-    // The identification packet is `0x01` then "vorbis". Searched for rather
-    // than read at a fixed offset because the page header's length varies with
-    // its segment table.
-    let marker: [UInt8] = [0x76, 0x6F, 0x72, 0x62, 0x69, 0x73]  // "vorbis"
-    guard bytes.count >= marker.count else { return false }
-    for start in 0...(bytes.count - marker.count) where Array(bytes[start..<start + marker.count]) == marker {
+    // Searched for rather than read at a fixed offset, because the page
+    // header's length varies with its segment table.
+    if contains(bytes, [0x76, 0x6F, 0x72, 0x62, 0x69, 0x73]) { return .vorbis }   // "vorbis"
+    if contains(bytes, [0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64]) { return .opus }  // "OpusHead"
+    return nil
+  }
+
+  private static func contains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
+    guard haystack.count >= needle.count else { return false }
+    for start in 0...(haystack.count - needle.count)
+    where Array(haystack[start..<start + needle.count]) == needle {
       return true
     }
     return false

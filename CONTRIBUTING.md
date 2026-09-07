@@ -14,8 +14,8 @@ and not something a rewrite launders.
 perpetual for the code published under it. Referencing or lifting from v4 is
 legally clean. If you do, attribute it in `NOTICE` and say what changed.
 
-Third-party code that is vendored — currently libogg and libvorbis under
-`ios/Vendor` — goes in unmodified, with its licence file alongside it and an
+Third-party code that is vendored — currently libogg, libvorbis, libopus and
+libopusfile under `ios/Vendor` — goes in unmodified, with its licence file alongside it and an
 entry in `NOTICE` naming the version and what was included.
 
 ## Verifying a change

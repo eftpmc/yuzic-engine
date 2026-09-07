@@ -1,5 +1,6 @@
 import XCTest
 import AVFoundation
+import COgg
 import CVorbis
 @testable import YuzicEngineCore
 
@@ -199,24 +200,24 @@ final class VorbisFileReaderTests: XCTestCase {
    transcoded by the server and plays.
    */
   func testAnOggVorbisStreamIsRecognised() {
-    XCTAssertTrue(HTTPTrackReaderFactory.isOggVorbis(MemorySource(encodeTone(seconds: 0.2))))
+    XCTAssertTrue(HTTPTrackReaderFactory.oggCodec(MemorySource(encodeTone(seconds: 0.2))) == .vorbis)
   }
 
-  func testAnOggStreamThatIsNotVorbisIsNotClaimed() {
+  func testAnOggOpusStreamIsRecognisedAsOpus() {
     // An Ogg page header followed by Opus's identification packet.
     var opus = Data([0x4F, 0x67, 0x67, 0x53, 0x00, 0x02, 0, 0, 0, 0, 0, 0])
     opus.append(contentsOf: Array("OpusHead".utf8))
     opus.append(Data(repeating: 0, count: 64))
-    XCTAssertFalse(HTTPTrackReaderFactory.isOggVorbis(MemorySource(opus)))
+    XCTAssertEqual(HTTPTrackReaderFactory.oggCodec(MemorySource(opus)), .opus)
   }
 
   func testSomethingThatIsNotOggIsNotClaimed() {
-    XCTAssertFalse(HTTPTrackReaderFactory.isOggVorbis(MemorySource(Data(repeating: 0x41, count: 512))))
+    XCTAssertNil(HTTPTrackReaderFactory.oggCodec(MemorySource(Data(repeating: 0x41, count: 512))))
   }
 
   /// Too short to judge: answer no and let the Core Audio path try.
   func testATruncatedStreamIsNotClaimed() {
-    XCTAssertFalse(HTTPTrackReaderFactory.isOggVorbis(MemorySource(Data([0x4F, 0x67, 0x67]))))
+    XCTAssertNil(HTTPTrackReaderFactory.oggCodec(MemorySource(Data([0x4F, 0x67, 0x67]))))
   }
 
   func testOpeningSomethingThatIsNotVorbisFails() throws {
