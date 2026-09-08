@@ -51,6 +51,21 @@ public final class AudioFileReader: TrackReader {
   /// Playable frames handed out so far. Tracked rather than asked for, because
   /// `ExtAudioFile` counts in file frames and this has to count in music.
   private var framesRead: Int64 = 0
+
+  /**
+   Why the read callback could not serve, when it was not the end of the file.
+
+   `readProc` answers Core Audio with an `OSStatus` and cannot throw, and
+   returning an error status is not enough on its own: the WAV parser passes it
+   up, and the FLAC parser swallows it and reports `noErr` with zero frames —
+   which `read` cannot tell from a file that ended. So the reason is recorded
+   here on the way down and raised by `read` on the way back up.
+
+   Set on the thread inside `ExtAudioFileRead`, which is the same thread that
+   called it: `AudioFileReader` is explicitly not thread-safe, and
+   `TrackPlayback.stopAndWait` exists to keep it that way.
+   */
+  fileprivate var sourceFailure: Error?
   public private(set) var sampleRate: Double = 0
   public private(set) var channelCount: UInt32 = 0
 
@@ -241,6 +256,9 @@ public final class AudioFileReader: TrackReader {
   public func read(frames: AVAudioFrameCount) throws -> AVAudioPCMBuffer? {
     guard let extFile, let outputFormat else { return nil }
 
+    // Cleared first so only a failure raised by *this* call is considered.
+    sourceFailure = nil
+
     // Stop at the last frame of music rather than the last frame of file. The
     // remainder is the encoder's block padding; decoding it would append
     // silence to every lossy track, which is the other half of the seam.
@@ -260,6 +278,20 @@ public final class AudioFileReader: TrackReader {
 
     var count = wanted
     let status = ExtAudioFileRead(extFile, &count, buffer.mutableAudioBufferList)
+
+    // Asked before the status and the frame count, because neither can be
+    // trusted to carry it. Returning an error from `readProc` is not enough:
+    // WAV propagates it, and FLAC does not — Core Audio's FLAC parser absorbs
+    // the failed read and reports `noErr` with zero frames, which is
+    // indistinguishable from the file ending. The engine believes it and
+    // advances, and a listener hears the song skip itself part-way through.
+    // Proven by test rather than assumed: the same stall throws on WAV and
+    // ended cleanly on FLAC, which is the format the fault was reported in.
+    if let failure = sourceFailure {
+      sourceFailure = nil
+      throw failure
+    }
+
     guard status == noErr else { throw ReaderError.readFailed(status) }
     guard count > 0 else { return nil }
 
@@ -280,9 +312,11 @@ public final class AudioFileReader: TrackReader {
         // that could not serve the bytes, which is a different thing entirely
         // and must not be reported as the song finishing.
         let total = (try? reader.source.totalBytes()) ?? 0
-        return total > 0 && position >= total
-          ? kAudioFileEndOfFileError
-          : kAudioFilePositionError
+        if total > 0 && position >= total { return kAudioFileEndOfFileError }
+        reader.sourceFailure = ByteSourceError.fetchFailed(
+          "empty read at \(position) of \(total)"
+        )
+        return kAudioFilePositionError
       }
       data.withUnsafeBytes { raw in
         buffer.copyMemory(from: raw.baseAddress!, byteCount: data.count)
@@ -298,6 +332,10 @@ public final class AudioFileReader: TrackReader {
       return kAudioFileEndOfFileError
     } catch {
       actualCount.pointee = 0
+      // Carried out of the callback as well as reported through the status,
+      // because a parser is free to absorb the status and Core Audio's FLAC
+      // one does. See `sourceFailure`.
+      reader.sourceFailure = error
       // Everything else is a failure to read, and reporting it as the end of
       // the file is what made a stalled network indistinguishable from a song
       // ending. The engine took the end-of-file at face value and advanced —

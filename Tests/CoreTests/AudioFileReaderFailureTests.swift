@@ -89,6 +89,92 @@ final class AudioFileReaderFailureTests: XCTestCase {
   }
 
   /**
+   The same tone as FLAC.
+
+   WAV is the wrong format to prove this with on its own. Its parser is a
+   header and a block of samples, so a read that fails has nowhere to go but
+   up. FLAC is a real decoder with its own framing, and the reported fault is
+   lossless over cellular — so the format the listener actually hit needs its
+   own test rather than the assumption that one parser behaves like another.
+   */
+  private static var flacFixture: Data?
+
+  private func flacData() throws -> Data {
+    if let cached = Self.flacFixture { return cached }
+
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("yuzic-engine-tests", isDirectory: true)
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let url = directory.appendingPathComponent("failure-fixture.flac")
+    try? FileManager.default.removeItem(at: url)
+
+    let sampleRate = 44_100.0
+    let settings: [String: Any] = [
+      AVFormatIDKey: kAudioFormatFLAC,
+      AVSampleRateKey: sampleRate,
+      AVNumberOfChannelsKey: 2,
+      AVLinearPCMBitDepthKey: 16,
+      AVEncoderBitDepthHintKey: 16,
+    ]
+
+    var writer: AVAudioFile? = try AVAudioFile(forWriting: url, settings: settings)
+    let pcmFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                  sampleRate: sampleRate, channels: 2, interleaved: false)!
+    let chunk = AVAudioFrameCount(sampleRate)
+    let buffer = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: chunk)!
+    buffer.frameLength = chunk
+
+    // Noise rather than a tone: FLAC compresses a sine to almost nothing, and
+    // a fixture that is mostly silence has too few frames to stall inside.
+    var phase = 0.0
+    for frame in 0..<Int(chunk) {
+      phase += 0.05
+      let sample = Float(0.4 * sin(phase) + 0.2 * sin(phase * 7.3))
+      buffer.floatChannelData![0][frame] = sample
+      buffer.floatChannelData![1][frame] = sample
+    }
+
+    for _ in 0..<5 { try writer?.write(from: buffer) }
+    writer = nil
+
+    let data = try Data(contentsOf: url)
+    Self.flacFixture = data
+    return data
+  }
+
+  /**
+   The reported case, in the format it was reported in.
+
+   Lossless over cellular, leaving the house — a stall a quarter of the way in
+   must reach the engine as a failure it can retry or report, not as the track
+   having finished. The engine takes an ending at face value and advances,
+   which is what a listener hears as the song skipping itself.
+   */
+  func testAStalledFLACSourceIsAFailureNotTheEndOfTheFile() throws {
+    let data = try flacData()
+    let source = FlakySource(
+      data: data, servableBytes: Int64(data.count) / 4, failure: .throwsFetchFailed
+    )
+    let reader = AudioFileReader(source: source)
+    try reader.open()
+
+    XCTAssertEqual(drain(reader), .threw,
+                   "a stalled FLAC stream was reported as a track that ended")
+  }
+
+  func testAnEmptyReadBeforeTheEndOfAFLACIsAlsoAFailure() throws {
+    let data = try flacData()
+    let source = FlakySource(
+      data: data, servableBytes: Int64(data.count) / 4, failure: .returnsEmpty
+    )
+    let reader = AudioFileReader(source: source)
+    try reader.open()
+
+    XCTAssertEqual(drain(reader), .threw,
+                   "an empty read mid-FLAC was reported as a track that ended")
+  }
+
+  /**
    The reported case: the source stalls a fraction of the way in.
 
    The reader must report that as a failure, so the engine can retry or say so,
