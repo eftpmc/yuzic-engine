@@ -72,14 +72,19 @@ export type RepeatMode = 'off' | 'one' | 'all';
  * What the engine is doing. `buffering` is distinct from `paused` because the
  * UI should say different things: one is waiting on the network, the other is
  * waiting on the user.
+ *
+ * There is deliberately no `error` here. Neither platform has ever sent one:
+ * a failure arrives as an `error` *event*, which carries a code and a message
+ * a state name could not, and the state that follows is whatever the engine
+ * is actually in afterwards. A member no producer emits is a member every
+ * consumer still has to handle, so it is not declared.
  */
 export type PlaybackState =
   | 'idle'
   | 'buffering'
   | 'playing'
   | 'paused'
-  | 'ended'
-  | 'error';
+  | 'ended';
 
 export interface Progress {
   positionSec: number;

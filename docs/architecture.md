@@ -612,28 +612,23 @@ running anything.
 Fixed since it was written down: iOS ignored `progressIntervalMs` while
 Android honoured it (a host asking for 1Hz got 4Hz on iOS); iOS forwarded both
 `stateChanged(.ended)` and `.ended` to the same wire event, so the queue
-finishing was announced twice; and `play()` did nothing on a player Android had
-left in `STATE_IDLE`, the same defect iOS had with a stopped `TrackPlayback`.
+finishing was announced twice; `play()` did nothing on a player Android had
+left in `STATE_IDLE`, the same defect iOS had with a stopped `TrackPlayback`;
+`ended` was emitted at every track boundary on Android and is now scoped to the
+end of the queue as it is on iOS; the first track of a queue announced itself
+on iOS and not on Android, and `setQueue` now sends `onTrackChange` for it;
+`skipToNext` under `repeat: one` replayed the track on Android and now advances
+as it does on iOS; and `PlaybackState = 'error'`, which neither platform ever
+emitted, is gone from `src/types.ts`.
+
+The Android half of that list is unverified. This machine has no Android
+toolchain — see the platform split in the README — so those changes are read
+and reasoned but never compiled or run. Treat them as such.
 
 Still true, and each is a decision rather than an oversight to fix blindly:
 
-- **`ended` arrives mid-queue on Android and only at the end on iOS.**
-  `setPauseAtEndOfMediaItems(true)` means every track ends in `STATE_ENDED`,
-  and the state is emitted before the advance, so a host sees
-  `playing → ended → buffering → playing` at each boundary. iOS emits it only
-  from `finish()`. A host that clears now-playing on `ended` misbehaves on
-  Android alone.
-- **No `trackChange` for the first track on Android.** iOS emits it from
-  `beginTrack`; Android's `play()` is `player.play()` and `setQueue` sends only
-  `onQueueChange`. A host learning what is playing from `trackChange` alone
-  hears nothing until the second track.
 - **After a failure iOS reports `paused` and Android `idle`.** Same error, two
   words for the state the player is left in.
-- **`skipToNext` under `repeat: one`** advances on iOS — deliberately, see
-  `PlaybackQueue.skipNextIndex` — and replays the same track on Android, which
-  uses `nextIndex`.
-- **`PlaybackState = 'error'` in `src/types.ts` is emitted by neither.** Dead
-  vocabulary in the contract.
 - **Android has no retry of its own.** It inherits ExoPlayer's default policy —
   three loader attempts, backoff capped at five seconds — where iOS now retries
   for a wall-clock budget with a visible buffering state. A handover iOS rides

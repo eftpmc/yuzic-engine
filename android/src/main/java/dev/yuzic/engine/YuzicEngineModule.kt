@@ -96,6 +96,25 @@ class YuzicEngineModule : Module() {
       // but over-calling is free and the exemption is the part that was wrong.
       commandsMayHaveChanged()
       sendEvent("onQueueChange", emptyMap<String, Any?>())
+      // The first track of a queue was the one track that never announced
+      // itself. `onTrackChange` was sent only from `advanceTo` and from the
+      // crossfade, both of which describe *leaving* a track — so a host that
+      // learns what is playing from `trackChange` alone (as an iOS host can:
+      // there the event comes from `beginTrack`, which runs for the first
+      // track too) knew nothing until the second track began. `setQueue` is
+      // this side's `beginTrack`: `loadActiveTrack` above has already made
+      // the track active and started it.
+      queue.activeTrack?.let { active ->
+        sendEvent(
+          "onTrackChange",
+          mapOf(
+            "index" to queue.activeIndex,
+            "id" to active.id,
+            // Nothing preceded it, so there is nothing listened to report.
+            "previousListenedSec" to null,
+          ),
+        )
+      }
     }
 
     AsyncFunction("append") { tracks: List<TrackRecord> ->
@@ -757,6 +776,23 @@ class YuzicEngineModule : Module() {
   private fun emitStateIfChanged() {
     val player = PlaybackService.graph?.activeVoice?.player ?: return
     val state = stateName(player)
+
+    /*
+     `ended` means the queue ran out, not that a track did.
+
+     `setPauseAtEndOfMediaItems(true)` makes every track end in `STATE_ENDED`,
+     including the ones with another track behind them, and this is called
+     before the advance — so a host saw `playing → ended → buffering → playing`
+     at every boundary while iOS emitted `ended` only when the queue was
+     actually finished. A host that clears now-playing on `ended`, which is the
+     obvious reading, misbehaved on Android alone.
+
+     Suppressed rather than renamed, and `lastState` is deliberately not
+     updated: the advance that follows emits `buffering` a moment later, and
+     that is the honest description of what is happening.
+    */
+    if (state == "ended" && queue.nextIndex != null) return
+
     if (state == lastState) return
     lastState = state
     sendEvent("onStateChange", mapOf("state" to state))
@@ -978,7 +1014,9 @@ class YuzicEngineModule : Module() {
     // change is a cut: a fade is for a track that ended, and eight seconds of
     // politeness after a button press reads as lag.
     cancelTransition()
-    queue.nextIndex?.let { advanceTo(it, listenedSeconds()) }
+    // `skipNextIndex`, not `nextIndex`: repeat `one` repeats a track that
+    // *ended*, and a pressed next button is a request to leave it.
+    queue.skipNextIndex?.let { advanceTo(it, listenedSeconds()) }
   }
 
   private fun skipToPreviousTrack() = onMain {

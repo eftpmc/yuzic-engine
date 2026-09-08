@@ -109,6 +109,30 @@ class PlaybackQueue {
       }
     }
 
+  /**
+   * Which track a *pressed* next button goes to.
+   *
+   * Different from [nextIndex] on purpose, and the difference is the whole
+   * point of having two: under `one`, a track that *ends* repeats — that is
+   * what the mode means — but a listener who presses next is asking to leave
+   * this track, and replaying it reads as a broken button. iOS has drawn that
+   * distinction since the queue was written (`skipNextIndex`); Android used
+   * `nextIndex` for both, so next under `repeat: one` replayed the same track
+   * on one platform and advanced on the other.
+   *
+   * Repeat `all` still wraps, because wrapping is what a listener pressing
+   * next at the end of a queue expects.
+   */
+  val skipNextIndex: Int?
+    get() {
+      if (tracks.isEmpty()) return null
+      val next = activeIndex + 1
+      return when (repeatMode) {
+        "all" -> next % tracks.size
+        else -> next.takeIf { it in tracks.indices }
+      }
+    }
+
   val nextTrack: TrackRecord?
     get() = nextIndex?.let { tracks.getOrNull(it) }
 
