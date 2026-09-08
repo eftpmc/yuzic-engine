@@ -169,10 +169,30 @@ public final class DiskCache {
       }
     }
 
+    /*
+     Every step checked, because the index is a claim about the file.
+
+     These were four `try?`s in a row, and the last of them mattered: the file
+     is truncated to full size up front, so a write that fails — a full disk,
+     which is the ordinary way this fails on a phone — leaves a correctly-sized
+     region of *zeros* where the index then records bytes as present. `read`
+     only rejects a short read, not a zeroed one, so the parser is later handed
+     silence and the entry survives an app restart. The track is broken until
+     something evicts it, and it looks like a corrupt library rather than a
+     disk that filled up.
+
+     A cache is allowed to fail to store something. It is not allowed to
+     remember storing something it did not.
+    */
     guard let handle = try? FileHandle(forWritingTo: url) else { return }
-    try? handle.seek(toOffset: UInt64(offset))
-    try? handle.write(contentsOf: data)
-    try? handle.close()
+    do {
+      try handle.seek(toOffset: UInt64(offset))
+      try handle.write(contentsOf: data)
+      try handle.close()
+    } catch {
+      try? handle.close()
+      return
+    }
 
     lock.lock()
     var entry = index[id] ?? Entry(totalBytes: totalBytes, ranges: [], lastUsed: 0)

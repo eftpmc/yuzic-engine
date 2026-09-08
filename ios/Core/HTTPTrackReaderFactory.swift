@@ -70,7 +70,7 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
     // extension — `/rest/stream.view?id=…` is the same shape whatever the
     // file is — and a server may transcode on the way out, so the only honest
     // answer to "what is this" is the first four bytes.
-    switch Self.oggCodec(source) {
+    switch try Self.oggCodec(source) {
     case .vorbis:
       let reader = VorbisFileReader(source: source)
       try reader.open()
@@ -105,13 +105,19 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
    Core Audio path — which will fail on the Ogg wrapper, exactly as it does
    today rather than newly.
 
-   A source that cannot be read yet answers nil and the Core Audio path is
-   tried, which is what would have happened anyway.
+   A read that *fails* is not an answer, and it used to be given as one: the
+   `nil` returned for a timeout or a 5xx is indistinguishable from the `nil`
+   that means "this is an MP3", so a genuine `.ogg` went to Core Audio — which
+   carries no Vorbis decoder at all — and failed to open. The two formats this
+   function exists to rescue were the two it made unplayable. It throws now,
+   and the caller decides.
+
+   Too *few* bytes is still an answer: a twelve-byte file is not an Ogg
+   stream.
    */
-  static func oggCodec(_ source: ByteSource) -> OggCodec? {
-    guard let head = try? source.read(offset: 0, count: 64), head.count >= 12 else {
-      return nil
-    }
+  static func oggCodec(_ source: ByteSource) throws -> OggCodec? {
+    let head = try source.read(offset: 0, count: 64)
+    guard head.count >= 12 else { return nil }
     let bytes = [UInt8](head)
     guard bytes.starts(with: [0x4F, 0x67, 0x67, 0x53]) else { return nil }  // "OggS"
 

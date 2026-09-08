@@ -59,6 +59,19 @@ public final class VorbisFileReader: TrackReader {
    */
   private var sourceFailure: Error?
 
+  /**
+   Whether the callback returned 0 because a read was cancelled on purpose.
+
+   `OpusFileReader` and `AudioFileReader` both carry this; this one did not,
+   and relied on vorbisfile reading the 0 as a clean end of stream. That works
+   — but "works" here means a cancellation arrives at `TrackPlayback` as
+   `reachedEnd`, i.e. as the track finishing, and the only thing standing
+   between that and a wrong advance is `stop()` happening to set `stopped`
+   first. That is an invariant nothing states, holding up the exact confusion
+   this file has been fixed for twice. Carried explicitly instead.
+   */
+  private var sourceCancelled = false
+
   public private(set) var totalFrames: Int64 = 0
   public private(set) var sampleRate: Double = 0
   public private(set) var channelCount: UInt32 = 0
@@ -154,6 +167,14 @@ public final class VorbisFileReader: TrackReader {
         throw failure
       }
 
+      // Before `decoded` is judged: a cancelled read reaches vorbisfile as a 0
+      // and comes back as a clean end of stream, which is the right unwind and
+      // the wrong thing to report as a finished track.
+      if sourceCancelled {
+        sourceCancelled = false
+        break
+      }
+
       if decoded == 0 { break }                      // end of stream
       if decoded < 0 { throw VorbisError.readFailed(Int32(decoded)) }
       guard let pcm else { break }
@@ -205,8 +226,9 @@ public final class VorbisFileReader: TrackReader {
     do {
       data = try source.read(offset: byteOffset, count: wanted)
     } catch ByteSourceError.cancelled {
-      // Abandoned on purpose by a seek. Unwinding as end of stream is right
-      // here, and there is nothing to report.
+      // Abandoned on purpose by a seek: an ending, not a failure — but an
+      // ending this reader states rather than infers.
+      sourceCancelled = true
       return 0
     } catch {
       sourceFailure = error

@@ -137,7 +137,7 @@ final class OpusFileReaderTests: XCTestCase {
   func testTheFixtureIsAValidOggOpusStream() {
     let data = encodeTone(seconds: 0.5)
     XCTAssertGreaterThan(data.count, 1000, "the encoder produced nothing to decode")
-    XCTAssertEqual(HTTPTrackReaderFactory.oggCodec(MemorySource(data)), .opus)
+    XCTAssertEqual(try HTTPTrackReaderFactory.oggCodec(MemorySource(data)), .opus)
   }
 
   func testReadsTheStreamShapeFromTheHeaders() throws {

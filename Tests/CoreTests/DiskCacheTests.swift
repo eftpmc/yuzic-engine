@@ -74,6 +74,52 @@ final class DiskCacheTests: XCTestCase {
     XCTAssertNotNil(cache.read("t1", range: 0..<768))
   }
 
+  /**
+   A write that fails is not recorded as a write that happened.
+
+   The file is truncated to its full size the moment the entry is created, so
+   the bytes a failed write did not deliver are not missing — they are zeros,
+   and they are exactly as long as the real ones. The index used to record the
+   range as present regardless, and `read` only rejects a *short* read, never a
+   zeroed one. The parser was then handed silence, and because the sidecar is
+   persisted the entry survived a restart: a track broken forever, looking like
+   a corrupt library rather than a disk that had filled up.
+
+   Forced with `RLIMIT_FSIZE`, which is what a full disk looks like from inside
+   a process — the open succeeds and the write returns EFBIG. `SIGXFSZ` is
+   ignored first, or exceeding the limit kills the test runner instead of
+   returning an error.
+   */
+  func testAFailedWriteIsNotRecordedAsPresent() throws {
+    let cache = try makeCache()
+
+    // A successful write first, so the entry and its file exist.
+    cache.write("track", offset: 0, data: bytes(64), totalBytes: 40_000)
+    XCTAssertNotNil(cache.read("track", range: 0..<64), "setup failed: the good write did not land")
+
+    let previous = signal(SIGXFSZ, SIG_IGN)
+    var limits = rlimit()
+    getrlimit(RLIMIT_FSIZE, &limits)
+    let originalLimit = limits.rlim_cur
+    defer {
+      limits.rlim_cur = originalLimit
+      setrlimit(RLIMIT_FSIZE, &limits)
+      signal(SIGXFSZ, previous)
+    }
+
+    // Anything written past 4KB now fails at the write, not at the open.
+    limits.rlim_cur = 4096
+    guard setrlimit(RLIMIT_FSIZE, &limits) == 0 else {
+      throw XCTSkip("could not lower RLIMIT_FSIZE on this machine")
+    }
+
+    cache.write("track", offset: 20_000, data: bytes(64, seed: 9), totalBytes: 40_000)
+
+    XCTAssertNil(cache.read("track", range: 20_000..<20_064),
+                 "the cache recorded a range it never managed to write — a later read "
+                 + "would be served zeros as though they were audio")
+  }
+
   func testAMissIsNilRatherThanEmpty() throws {
     let cache = try makeCache()
     XCTAssertNil(cache.read("never-seen", range: 0..<10))

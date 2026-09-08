@@ -199,8 +199,8 @@ final class VorbisFileReaderTests: XCTestCase {
    this reader, which fails with a header error — where today it is
    transcoded by the server and plays.
    */
-  func testAnOggVorbisStreamIsRecognised() {
-    XCTAssertTrue(HTTPTrackReaderFactory.oggCodec(MemorySource(encodeTone(seconds: 0.2))) == .vorbis)
+  func testAnOggVorbisStreamIsRecognised() throws {
+    XCTAssertTrue(try HTTPTrackReaderFactory.oggCodec(MemorySource(encodeTone(seconds: 0.2))) == .vorbis)
   }
 
   func testAnOggOpusStreamIsRecognisedAsOpus() {
@@ -208,16 +208,16 @@ final class VorbisFileReaderTests: XCTestCase {
     var opus = Data([0x4F, 0x67, 0x67, 0x53, 0x00, 0x02, 0, 0, 0, 0, 0, 0])
     opus.append(contentsOf: Array("OpusHead".utf8))
     opus.append(Data(repeating: 0, count: 64))
-    XCTAssertEqual(HTTPTrackReaderFactory.oggCodec(MemorySource(opus)), .opus)
+    XCTAssertEqual(try HTTPTrackReaderFactory.oggCodec(MemorySource(opus)), .opus)
   }
 
-  func testSomethingThatIsNotOggIsNotClaimed() {
-    XCTAssertNil(HTTPTrackReaderFactory.oggCodec(MemorySource(Data(repeating: 0x41, count: 512))))
+  func testSomethingThatIsNotOggIsNotClaimed() throws {
+    XCTAssertNil(try HTTPTrackReaderFactory.oggCodec(MemorySource(Data(repeating: 0x41, count: 512))))
   }
 
   /// Too short to judge: answer no and let the Core Audio path try.
-  func testATruncatedStreamIsNotClaimed() {
-    XCTAssertNil(HTTPTrackReaderFactory.oggCodec(MemorySource(Data([0x4F, 0x67, 0x67]))))
+  func testATruncatedStreamIsNotClaimed() throws {
+    XCTAssertNil(try HTTPTrackReaderFactory.oggCodec(MemorySource(Data([0x4F, 0x67, 0x67]))))
   }
 
   func testOpeningSomethingThatIsNotVorbisFails() throws {
