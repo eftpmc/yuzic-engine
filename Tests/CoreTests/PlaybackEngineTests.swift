@@ -419,11 +419,16 @@ final class PlaybackEngineTests: XCTestCase {
     /// Called as a reader is made, so a test can look at the graph at exactly
     /// the moment the engine would be blocking on a network round trip.
     var onMakeReader: ((MediaId) -> Void)?
+    /// Ids whose open should fail, for driving the preload's failure path.
+    var failOpensFor: Set<MediaId> = []
     init(data: Data) { self.data = data }
 
     func makeReader(for track: Track) throws -> TrackReader {
       opened.append(track.id)
       onMakeReader?(track.id)
+      if failOpensFor.contains(track.id) {
+        throw ByteSourceError.fetchFailed("open refused by fixture")
+      }
       let source = CachedByteSource(fetcher: MemoryFetcher(data), windowBytes: 32 * 1024)
       return AudioFileReader(source: source)
     }
@@ -679,6 +684,46 @@ final class PlaybackEngineTests: XCTestCase {
     XCTAssertFalse(engine.activePlaybackIsFinishedForTesting,
                    "play resumed the dead playback instead of starting a live one")
     XCTAssertNotEqual(engine.state, .idle)
+  }
+
+  /**
+   A preload that cannot open backs off instead of hammering the server.
+
+   The preload is driven by the ticker, four times a second, and its guard
+   admits exactly the state a failure leaves behind — `preparedNext` nil,
+   `preloading` false. So a next track that would not open was retried
+   immediately and forever. Against a real Navidrome that was thirty stream
+   requests for one track in four seconds.
+
+   The reason it matters is not the log: those opens share a connection with
+   the audio being played, so on a weak link the preload competes with the
+   stream and makes the stall it exists to prevent more likely.
+
+   Counted rather than timed — the assertion is "it stopped asking", which is
+   the property. A handful of attempts is fine; dozens is the bug.
+   */
+  func testAFailingPreloadStopsHammering() throws {
+    let (engine, factory, _) = try makeEngine()
+
+    engine.setQueue([song("a"), song("b")], startIndex: 0)
+    factory.failOpensFor = ["b"]
+    try engine.play()
+
+    let playing = expectation(description: "reaches playing")
+    let deadline = Date().addingTimeInterval(5)
+    DispatchQueue.global().async {
+      while Date() < deadline && engine.state != .playing { usleep(10_000) }
+      playing.fulfill()
+    }
+    wait(for: [playing], timeout: 6)
+
+    // Three seconds of ticker: twelve chances to ask.
+    RunLoop.current.run(until: Date().addingTimeInterval(3))
+
+    let attemptsOnB = factory.opened.filter { $0 == "b" }.count
+    XCTAssertGreaterThan(attemptsOnB, 0, "the preload never tried at all")
+    XCTAssertLessThan(attemptsOnB, 5,
+                      "a failing preload is still being retried at ticker rate (\(attemptsOnB) opens in 3s)")
   }
 
   func testSkippingMovesTheQueueAndOpensTheNewTrack() throws {

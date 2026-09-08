@@ -104,6 +104,31 @@ public final class PlaybackEngine {
   private var preloading = false
 
   /**
+   When a failed preload may be attempted again, and for which track.
+
+   The preload is driven by the ticker, four times a second. A failure left
+   `preparedNext` nil and `preloading` false, which is precisely the state the
+   guard admits — so a preload that could not open was retried immediately,
+   forever, at 4Hz. Each attempt is a reader open: a content-length probe and,
+   on the transcoded path, a stream start. Measured against a real server that
+   is thirty requests for one track inside four seconds.
+
+   The log noise is the least of it. Those requests share a connection with the
+   audio that is playing, so on a weak link the preload competes with the
+   stream for bandwidth and makes the stall it exists to prevent more likely.
+   The claim in this file that the feature "turns itself off exactly where it
+   would do harm" held only for a low buffer, not for an open that fails while
+   the buffer still looks healthy.
+
+   Backed off exponentially, and forgotten as soon as the queue moves on to a
+   different next track.
+   */
+  private var preloadRetryAfter: Date?
+  private var preloadFailures = 0
+  private var preloadFailedFor: MediaId?
+  private static let preloadBackoffCapSec: Double = 30
+
+  /**
    How far ahead the current track must be decoded before the next one is
    fetched.
 
@@ -686,6 +711,15 @@ public final class PlaybackEngine {
    */
   private func preloadNextIfIdle(bufferedAheadSec: Double, remainingSec: Double) {
     guard preparedNext == nil, !preloading, !transitioning, state == .playing else { return }
+
+    // A different next track is a different question, so a previous failure
+    // says nothing about it.
+    if let failedFor = preloadFailedFor, failedFor != queue.nextTrack?.id {
+      preloadFailedFor = nil
+      preloadFailures = 0
+      preloadRetryAfter = nil
+    }
+    if let retryAfter = preloadRetryAfter, now() < retryAfter { return }
     // Or everything that is left, whichever is less. A flat threshold never
     // fires on a track shorter than it — which is exactly the interlude a
     // listener is most likely to skip out of.
@@ -710,11 +744,27 @@ public final class PlaybackEngine {
       DispatchQueue.main.async { [weak self] in
         guard let self else { return }
         self.preloading = false
+
+        guard let opened else {
+          // Back off rather than letting the ticker ask again in 250ms.
+          self.preloadFailedFor = next.id
+          self.preloadFailures += 1
+          let delay = min(
+            pow(2, Double(self.preloadFailures)),
+            Self.preloadBackoffCapSec
+          )
+          self.preloadRetryAfter = self.now().addingTimeInterval(delay)
+          return
+        }
+
         // Checked again on arrival: the queue may have moved while this was in
         // flight, and handing back a reader for a track that is no longer next
         // is how a skip plays the wrong thing.
-        guard let opened, self.queue.nextTrack?.id == next.id else { return }
+        guard self.queue.nextTrack?.id == next.id else { return }
         self.preparedNext = (next.id, opened)
+        self.preloadFailedFor = nil
+        self.preloadFailures = 0
+        self.preloadRetryAfter = nil
       }
     }
   }
