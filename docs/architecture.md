@@ -1,6 +1,6 @@
 # Architecture
 
-Ten decisions, each with the reason it went that way. The later ones came out
+Thirteen sections: twelve decisions, each with the reason it went that way, and a record of where the two platforms still disagree. The later ones came out
 of measurement rather than design, which is why they read differently. Anything that contradicts one of these is either a mistake or
 a decision to revisit here first.
 
@@ -599,6 +599,45 @@ The general form: when you receive work you did not do, verify a property of the
 result rather than trusting a claim about the process. "That is every hunk" and
 "the tests pass" are both claims about process. "Every function that exists is
 reachable" is a property of the artefact in front of you.
+
+## 13. Where the two platforms still disagree
+
+`Tools/parity.py` compares method names, argument types, event names and the
+state vocabulary. It cannot compare *when* an event is sent, and that is where
+every remaining divergence lives — so a green run says the surfaces match, not
+that the platforms behave alike. What follows is the list that check cannot
+make, found by reading both implementations against each other rather than by
+running anything.
+
+Fixed since it was written down: iOS ignored `progressIntervalMs` while
+Android honoured it (a host asking for 1Hz got 4Hz on iOS); iOS forwarded both
+`stateChanged(.ended)` and `.ended` to the same wire event, so the queue
+finishing was announced twice; and `play()` did nothing on a player Android had
+left in `STATE_IDLE`, the same defect iOS had with a stopped `TrackPlayback`.
+
+Still true, and each is a decision rather than an oversight to fix blindly:
+
+- **`ended` arrives mid-queue on Android and only at the end on iOS.**
+  `setPauseAtEndOfMediaItems(true)` means every track ends in `STATE_ENDED`,
+  and the state is emitted before the advance, so a host sees
+  `playing → ended → buffering → playing` at each boundary. iOS emits it only
+  from `finish()`. A host that clears now-playing on `ended` misbehaves on
+  Android alone.
+- **No `trackChange` for the first track on Android.** iOS emits it from
+  `beginTrack`; Android's `play()` is `player.play()` and `setQueue` sends only
+  `onQueueChange`. A host learning what is playing from `trackChange` alone
+  hears nothing until the second track.
+- **After a failure iOS reports `paused` and Android `idle`.** Same error, two
+  words for the state the player is left in.
+- **`skipToNext` under `repeat: one`** advances on iOS — deliberately, see
+  `PlaybackQueue.skipNextIndex` — and replays the same track on Android, which
+  uses `nextIndex`.
+- **`PlaybackState = 'error'` in `src/types.ts` is emitted by neither.** Dead
+  vocabulary in the contract.
+- **Android has no retry of its own.** It inherits ExoPlayer's default policy —
+  three loader attempts, backoff capped at five seconds — where iOS now retries
+  for a wall-clock budget with a visible buffering state. A handover iOS rides
+  out still kills the track on Android.
 
 ## What is not decided yet
 

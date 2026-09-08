@@ -184,6 +184,22 @@ public final class PlaybackEngine {
   private var publishedPosition: Double?
   private var publishedAt: Date?
 
+  /**
+   How often `progress` is emitted to the host.
+
+   The ticker runs at 4Hz because a crossfade has to start within a frame of
+   where it should — that is a *scheduling* rate and not a display one. Every
+   tick also emitted `progress`, so a host that asked for one update a second
+   got four, and re-rendered four times, and the `progressIntervalMs` it passed
+   to `setup` did nothing on this platform while Android honoured it. Same
+   field, same contract, two behaviours, and no tool in this repo compares
+   them.
+
+   Emission is throttled here; the ticker is untouched.
+   */
+  public var progressIntervalSec: Double = 1.0
+  private var lastProgressEmit: Date?
+
   private var observers: [NSObjectProtocol] = []
 
   /// Set while an interruption is in force, so `.ended` only resumes playback
@@ -1126,7 +1142,11 @@ public final class PlaybackEngine {
     // Read once, through the same accessor `getProgress` uses, so the event
     // and the answer to a direct question cannot drift apart.
     let (position, duration, buffered) = progress
-    emit(.progress(positionSec: position, durationSec: duration, bufferedSec: buffered))
+    let sinceLast = lastProgressEmit.map { now().timeIntervalSince($0) } ?? .greatestFiniteMagnitude
+    if sinceLast >= progressIntervalSec {
+      lastProgressEmit = now()
+      emit(.progress(positionSec: position, durationSec: duration, bufferedSec: buffered))
+    }
 
     // Correct the lock screen when it has drifted, rather than on a timer.
     // Re-sending the fix point every tick stutters; leaving it alone lets the

@@ -91,6 +91,11 @@ public final class YuzicEngineModule: Module {
         self.cache = cache
         let engine = PlaybackEngine(graph: graph, factory: HTTPTrackReaderFactory(cache: cache))
         engine.onEvent = { [weak self] event in self?.forward(event) }
+        // Honoured rather than ignored — Android has always applied it, and a
+        // host asking for 1Hz was getting 4Hz of bridge traffic here. Floored
+        // the same way Android floors it.
+        engine.progressIntervalSec =
+          Double(max(100, options?.progressIntervalMs ?? 1000)) / 1000.0
         self.graph = graph
         self.engine = engine
         self.sleepTimer = SleepTimer { [weak self] fade in
@@ -360,7 +365,13 @@ public final class YuzicEngineModule: Module {
         "positionSec": position, "durationSec": duration, "bufferedSec": buffered,
       ])
     case .ended:
-      sendEvent("onStateChange", ["state": "ended"])
+      // Deliberately not forwarded. `finish()` sets `state = .ended` first,
+      // whose `didSet` already sent `onStateChange: ended` through the case
+      // above — so forwarding this as well told the host the queue had
+      // finished twice. The engine keeps the distinct event because "the queue
+      // ran out" and "the state is now ended" are different statements
+      // internally; on the wire there is only the one state.
+      break
     case .failed(let message):
       sendEvent("onError", ["code": "PLAYBACK_FAILED", "message": message])
     }
