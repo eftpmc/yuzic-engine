@@ -145,9 +145,19 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
     let fetcher = HTTPByteFetcher(url: url, headers: track.headers)
     do {
       _ = try fetcher.contentLength()
-    } catch {
-      // No length means a transcode in progress, not a broken server.
+    } catch HTTPByteFetcher.HTTPFetchError.noLength {
+      // The one error that really does mean "transcode in progress": the
+      // server is encoding as it sends and cannot say how long the result will
+      // be.
       return streamingSource(url: url, track: track)
+    } catch {
+      // Everything else is a broken server, an expired token or a timeout, and
+      // catching them all here turned each into a silent downgrade: the track
+      // spent the rest of its life on the sequential transport, with no
+      // forward seek, no disk cache, and a length guessed from an assumed
+      // bitrate. A 401 then surfaced as "could not open" from the parser a few
+      // hundred bytes in rather than as the status that explains it.
+      throw error
     }
 
     if fetcher.rangesSupported == false {

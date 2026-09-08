@@ -859,6 +859,11 @@ public final class PlaybackEngine {
         do {
           try self.beginTrack(at: index, fromFrame: 0, prepared: reader, announced: true)
         } catch {
+          // `.paused` as well as the error, matching the branch above and the
+          // prepared-reader path. Emitting alone left the spinner running
+          // beside the error toast.
+          self.state = .paused
+          self.publishNowPlaying()
           self.emit(.failed("Could not play \(track.title): \(error)"))
         }
       }
@@ -968,7 +973,18 @@ public final class PlaybackEngine {
       // starts again, `.all` wraps at the end instead of finishing.
       guard let next = self.queue.nextIndex else { self.finish(); return }
       self.queue.set(self.queue.tracks, startIndex: next)
-      try? self.beginTrack(at: next, fromFrame: 0, previousListenedSec: listened)
+      do {
+        try self.beginTrack(at: next, fromFrame: 0, previousListenedSec: listened)
+      } catch {
+        // `beginTrack` sets `.buffering` and *then* opens the reader, so a
+        // discarded throw here left a spinner that never resolves and no
+        // error anywhere. This is the automatic advance — the most travelled
+        // transition in the engine — and it was the one path that swallowed.
+        let title = self.queue.activeTrack?.title ?? "the next track"
+        self.state = .paused
+        self.publishNowPlaying()
+        self.emit(.failed("Could not open \(title): \(error)"))
+      }
     }
   }
 
@@ -986,6 +1002,14 @@ public final class PlaybackEngine {
   /// Leave a stopped playback in place, which is what a failed stream and a
   /// failed graph rebuild both do, without needing either to happen.
   func stopActivePlaybackForTesting() { activePlayback?.stop() }
+
+  /// Whether the active playback has its handlers attached. `finishActive…`
+  /// cannot answer this — it calls `handleTrackFinished` directly and so
+  /// passes whether or not `onEndOfTrack` was ever assigned, which is exactly
+  /// how the unwired crossfade path went unnoticed.
+  var activePlaybackIsWiredForTesting: Bool {
+    activePlayback?.onEndOfTrack != nil && activePlayback?.onReadFailed != nil
+  }
   var activePlaybackIsFinishedForTesting: Bool { activePlayback?.isFinished ?? true }
 
   func stallActiveTrackForTesting() { activePlayback?.onReadStalled?() }
@@ -1169,6 +1193,12 @@ public final class PlaybackEngine {
       graph.reconnectIdleVoice(toSourceRate: reader.sampleRate)
 
       let incoming = TrackPlayback(reader: reader, voice: graph.idleVoice, label: "decode.incoming")
+      // The fourth site, and the one `wire` warned about in as many words.
+      // Without this the track the crossfade brings in has no end-of-track
+      // handler, so when it finishes the queue never advances — the music
+      // stops with the player still reporting that it is playing — and a lost
+      // stream on it is silent too.
+      wire(incoming)
       incomingPlayback = incoming
       // Set before the fade begins, not at the crossover: a track arriving at
       // the wrong loudness and being corrected halfway through the fade is

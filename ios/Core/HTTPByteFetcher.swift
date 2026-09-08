@@ -186,7 +186,28 @@ public final class HTTPByteFetcher: ByteFetcher, @unchecked Sendable {
     state.unlock()
 
     task.resume()
-    semaphore.wait()
+
+    /*
+     A deadline, because `timeoutInterval` is not one.
+
+     URLSession applies it as `timeoutIntervalForRequest` — the maximum gap
+     *between* bytes — while `timeoutIntervalForResource` on `URLSession.shared`
+     is seven days. A server dribbling one byte every few seconds therefore
+     keeps the request alive indefinitely and parks the decode thread here for
+     as long as it likes, with nothing thrown: the same hang that
+     `StreamingByteSource.read` had, one layer down.
+
+     Twice the idle timeout: a healthy 256KB window arrives well inside it, and
+     anything slower than half a byte per `timeout` seconds is not a stream
+     anyone can listen to.
+    */
+    if semaphore.wait(timeout: .now() + timeout * 2) == .timedOut {
+      task.cancel()
+      state.lock()
+      if inFlight === task { inFlight = nil }
+      state.unlock()
+      throw HTTPFetchError.transport("request exceeded \(timeout * 2)s wall clock")
+    }
 
     state.lock()
     if inFlight === task { inFlight = nil }

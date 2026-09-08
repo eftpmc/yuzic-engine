@@ -726,6 +726,55 @@ final class PlaybackEngineTests: XCTestCase {
                       "a failing preload is still being retried at ticker rate (\(attemptsOnB) opens in 3s)")
   }
 
+  /**
+   A track brought in by a crossfade still ends properly.
+
+   `wire` attaches `onEndOfTrack`, `onReadFailed` and the stall signals, and it
+   says in its own comment that it exists "because the failure handler is the
+   kind of thing a fourth site would omit without noticing". There were four
+   sites. `continueTransition` was the one that omitted it.
+
+   So every track entered through a crossfade had no end-of-track handler: it
+   played to its last sample, `notifyEndIfDrained` called nothing, and the
+   queue never advanced — the music stopped with the engine still reporting
+   that it was playing. A read failure on that track was silent for the same
+   reason.
+
+   Drives the crossfade, lets the crossover happen, and then asks the track
+   that is now active to finish. If the handler is attached the queue moves.
+   */
+  func testATrackEnteredByCrossfadeStillAdvancesTheQueue() throws {
+    let (engine, _, _) = try makeEngine()
+
+    var advancedTo: [Int] = []
+    engine.onEvent = { if case .trackChanged(let index, _, _) = $0 { advancedTo.append(index) } }
+
+    engine.setQueue([song("a"), song("b"), song("c")], startIndex: 0)
+    try engine.play()
+
+    let playing = expectation(description: "reaches playing")
+    let deadline = Date().addingTimeInterval(5)
+    DispatchQueue.global().async {
+      while Date() < deadline && engine.state != .playing { usleep(10_000) }
+      playing.fulfill()
+    }
+    wait(for: [playing], timeout: 6)
+
+    // A short fade, then wait out the crossover so "b" is the active playback.
+    engine.beginTransitionForTesting(over: 0.4)
+    RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+
+    XCTAssertEqual(engine.queue.activeIndex, 1, "the crossfade did not hand over")
+
+    // Asked of the playback itself. Driving `finishActiveTrackForTesting`
+    // instead would call `handleTrackFinished` directly and pass either way,
+    // which is how this went unnoticed in the first place.
+    XCTAssertTrue(engine.activePlaybackIsWiredForTesting,
+                  "the track the crossfade brought in has no end-of-track or "
+                  + "failure handler, so finishing it will advance nothing and "
+                  + "a lost stream on it will be silent")
+  }
+
   func testSkippingMovesTheQueueAndOpensTheNewTrack() throws {
     let (engine, factory, _) = try makeEngine()
     engine.setQueue([song("a"), song("b"), song("c")], startIndex: 0)
