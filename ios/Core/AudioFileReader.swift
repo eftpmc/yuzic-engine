@@ -66,6 +66,43 @@ public final class AudioFileReader: TrackReader {
    `TrackPlayback.stopAndWait` exists to keep it that way.
    */
   fileprivate var sourceFailure: Error?
+
+  /**
+   Whether the decoder has to be put back before it can be read again.
+
+   A failed read does not leave every parser where it found it. WAV carries on
+   from the next call, because there is no decoder state to lose — but Core
+   Audio's FLAC parser latches, and every subsequent read returns zero frames
+   whatever the source does. Measured: a stall a quarter of the way into a
+   five-second file left it stuck at 40,960 frames of 220,500, and it never
+   moved again after the source recovered.
+
+   That matters because `TrackPlayback` retries a failed read for about
+   thirty-three seconds and retries *the same reader*. Against a latched parser
+   the ladder cannot win — it either exhausts the budget or comes back with a
+   clean end — so a hiccup the connection recovered from a second later still
+   ended the track. Seeking back to the current position rebuilds the parser's
+   state, and is cheap: the bytes it re-reads are the ones already in the cache.
+   */
+  private var needsResetAfterFailure = false
+
+  /// The file-type hint `open` was given, so a rebuild can use it again.
+  private var openHint: AudioFileTypeID = 0
+
+  /**
+   Whether the read callback unwound because a read was cancelled on purpose.
+
+   `readProc` answers a cancellation with `kAudioFileEndOfFileError`, which is
+   how a seek abandons the read in flight without looking like a corrupt track.
+   That is enough for WAV and FLAC, whose parsers pass the ending up as zero
+   frames. The MP4 parser does not: it treats the truncation as a hard error
+   and `ExtAudioFileRead` returns a failure status, so a deliberate seek on an
+   ALAC or AAC track surfaced as a decode error.
+
+   So the intent is carried across the callback boundary, the same way a
+   failure is, and `read` uses it to unwind cleanly whatever the status says.
+   */
+  fileprivate var sourceCancelled = false
   public private(set) var sampleRate: Double = 0
   public private(set) var channelCount: UInt32 = 0
 
@@ -95,6 +132,9 @@ public final class AudioFileReader: TrackReader {
   public func open() throws { try open(hint: 0) }
 
   public func open(hint: AudioFileTypeID = 0) throws {
+    // Kept so a rebuild after a failed read opens the same way this did,
+    // rather than making the parser sniff a container it was told about once.
+    openHint = hint
     let context = Unmanaged.passUnretained(self).toOpaque()
 
     var file: AudioFileID?
@@ -248,16 +288,65 @@ public final class AudioFileReader: TrackReader {
   public func resumePendingReads() { source.resume() }
 
   /**
+   Build a fresh parser over the same source, positioned where the decode was.
+
+   A seek is not enough, and that was measured rather than assumed: after a
+   failed read a seek back to the current frame yielded exactly one more buffer
+   — 41,472 frames where the whole file is 220,500 — and then stopped again.
+   The latch is in the `AudioFile` parser underneath, not in the `ExtAudioFile`
+   cursor above it, so both are disposed and rebuilt.
+
+   Cheap despite how it reads. The bytes the new parser needs to re-read are
+   the ones the byte source already has: reopening costs a header parse against
+   the cache, not a second download.
+
+   `framesRead` is carried across deliberately — it is the position the *audio*
+   has reached, which the new parser knows nothing about, and it is what the
+   seek at the end restores.
+   */
+  private func rebuildAfterFailure() throws {
+    let resumeAt = framesRead
+
+    if let extFile { ExtAudioFileDispose(extFile) }
+    if let audioFile { AudioFileClose(audioFile) }
+    extFile = nil
+    audioFile = nil
+
+    try open(hint: openHint)
+
+    framesRead = resumeAt
+    guard let ext = extFile else { throw ReaderError.openFailed(-1) }
+    let status = ExtAudioFileSeek(ext, resumeAt)
+    guard status == noErr else { throw ReaderError.readFailed(status) }
+  }
+
+  /**
    Decode up to `frames` frames.
 
    Returns nil at end of stream. A short buffer is normal near the end and is
    not an error.
    */
   public func read(frames: AVAudioFrameCount) throws -> AVAudioPCMBuffer? {
-    guard let extFile, let outputFormat else { return nil }
-
-    // Cleared first so only a failure raised by *this* call is considered.
+    // Cleared first so only what happened during *this* call is considered.
     sourceFailure = nil
+    sourceCancelled = false
+
+    // A previous read failed and may have left the parser unable to go on.
+    // Rebuilt before anything is asked of it — and before `extFile` is read
+    // below, because recovery replaces it.
+    if needsResetAfterFailure {
+      needsResetAfterFailure = false
+      do {
+        try rebuildAfterFailure()
+      } catch {
+        // Still down. Report it as the failure it is so the caller can retry,
+        // and stay armed so the next attempt tries to recover again.
+        needsResetAfterFailure = true
+        throw error
+      }
+    }
+
+    guard let extFile, let outputFormat else { return nil }
 
     // Stop at the last frame of music rather than the last frame of file. The
     // remainder is the encoder's block padding; decoding it would append
@@ -289,7 +378,17 @@ public final class AudioFileReader: TrackReader {
     // ended cleanly on FLAC, which is the format the fault was reported in.
     if let failure = sourceFailure {
       sourceFailure = nil
+      needsResetAfterFailure = true
       throw failure
+    }
+
+    // Before the status, for the same reason: a cancellation is deliberate and
+    // ends the read, but the MP4 parser reports it as an error rather than as
+    // an ending. Raising that would make an ordinary seek look like a broken
+    // track — which is the exact confusion `readProc` answers EOF to avoid.
+    if sourceCancelled {
+      sourceCancelled = false
+      return nil
     }
 
     guard status == noErr else { throw ReaderError.readFailed(status) }
@@ -325,6 +424,9 @@ public final class AudioFileReader: TrackReader {
       return noErr
     } catch ByteSourceError.cancelled {
       actualCount.pointee = 0
+      // Remembered as well as reported, because not every parser passes the
+      // ending up as an ending. See `sourceCancelled`.
+      reader.sourceCancelled = true
       // A cancelled read is not a corrupt file — a seek abandons the read in
       // flight on purpose. Reporting end-of-file lets the parser unwind
       // cleanly instead of surfacing a decode error the caller would have to
