@@ -27,6 +27,31 @@ public protocol ByteSource: AnyObject {
   /// Unblocks any waiting read. A seek cancels what is in flight.
   func cancel()
   func resume()
+
+  /**
+   Whether this source can only be read forwards, in the order bytes arrive.
+
+   True for the transcoded transport and false for everything else. It is not
+   a detail the parsers care about — they read where they read and this waits
+   or fetches — but it decides what *recovery* means, and there the two are
+   opposites. A ranged source that fails can be asked for the same bytes
+   again, so retrying the read is the whole fix. A sequential one cannot: the
+   bytes were coming from a producer that has now stopped, and reading again
+   waits on a stream nobody is sending. Recovering there means asking the
+   server for a *new* stream from the position reached, which is a different
+   byte stream and therefore a different reader.
+
+   Distinguished here rather than by testing the concrete type, so a reader
+   can forward it without knowing which sources exist.
+   */
+  var isSequential: Bool { get }
+}
+
+public extension ByteSource {
+  /// Seekable unless a source says otherwise: the ranged transport is the
+  /// normal case and the sequential one is the exception that has to declare
+  /// itself.
+  var isSequential: Bool { false }
 }
 
 extension CachedByteSource: ByteSource {}

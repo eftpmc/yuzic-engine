@@ -172,7 +172,20 @@ public final class TrackPlayback {
     return frame
   }
 
-  public func start(atFrame frame: Int64 = 0) throws {
+  /**
+   Begin decoding, reporting positions from `frame`.
+
+   `readerOrigin` is which frame of the *track* the reader's own frame zero
+   is. Zero for every reader that holds the whole file, which is why it
+   defaults there and why most callers never mention it. A stream restarted
+   partway in is the exception: the server was asked for the track from
+   `timeOffset` onwards, so the bytes begin at that point and the reader
+   counts from zero regardless — while the position the listener sees, the
+   lock screen's fix point and the scrobble all have to keep counting from
+   where the track really is. Separating the two is what stops a reconnection
+   from throwing the progress bar back to 0:00.
+   */
+  public func start(atFrame frame: Int64 = 0, readerOrigin: Int64 = 0) throws {
     lock.lock()
     stopped = false
     reachedEnd = false
@@ -183,7 +196,7 @@ public final class TrackPlayback {
     stalledSince = nil
     lock.unlock()
 
-    try reader.seek(toFrame: frame)
+    try reader.seek(toFrame: max(0, frame - readerOrigin))
     fill()
     voice.player.play()
   }

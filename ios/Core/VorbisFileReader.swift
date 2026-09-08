@@ -209,6 +209,8 @@ public final class VorbisFileReader: TrackReader {
     return Int64(Double(bytesAhead) * framesPerByte)
   }
 
+  public var isSequential: Bool { source.isSequential }
+
   public func cancelPendingReads() { source.cancel() }
   public func resumePendingReads() { source.resume() }
 

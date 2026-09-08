@@ -281,6 +281,8 @@ public final class AudioFileReader: TrackReader {
    holding a reader has no business knowing whether the bytes come from a
    socket or a file.
    */
+  public var isSequential: Bool { source.isSequential }
+
   public func cancelPendingReads() { source.cancel() }
 
   /// Undo `cancelPendingReads`. Required before the reader is used again — a

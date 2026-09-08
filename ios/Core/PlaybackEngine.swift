@@ -6,6 +6,26 @@ import AVFoundation
 /// transports lives in one place rather than inside the engine.
 public protocol TrackReaderFactory {
   func makeReader(for track: Track) throws -> TrackReader
+
+  /**
+   A reader for `track` whose first frame is `timeOffsetSeconds` into it.
+
+   Only meaningful for the sequential transport, and only the sequential
+   transport implements it: a ranged source is seekable, so the engine reaches
+   an offset with `seek` and never asks for this. On a transcoded stream there
+   is nothing to seek — the offset has to be part of the *request*, which
+   makes the result a different byte stream and so a different reader.
+
+   The default ignores the offset, which is the right answer for any factory
+   that only ever hands back seekable readers, test doubles included.
+   */
+  func makeReader(for track: Track, timeOffsetSeconds: Int) throws -> TrackReader
+}
+
+public extension TrackReaderFactory {
+  func makeReader(for track: Track, timeOffsetSeconds: Int) throws -> TrackReader {
+    try makeReader(for: track)
+  }
 }
 
 /**
@@ -82,6 +102,24 @@ public final class PlaybackEngine {
    carries the token it started with and is dropped if it no longer matches.
    */
   private var openToken: Int = 0
+
+  /**
+   How many times the current track has been reconnected — see
+   `reconnectStream`.
+
+   Bounded because the failure this recovers from is indistinguishable, from
+   here, from a server that has stopped answering: both arrive as a read that
+   would not complete. Unbounded, a dead server would be asked for the same
+   track for as long as the app ran, at a rate set by how fast it refuses.
+   Reset when a track begins and when reads resume, so the budget is per
+   outage rather than per listening session.
+   */
+  private var reconnectAttempts = 0
+
+  /// A stream may be picked up this many times before the track is given up.
+  /// Three is enough to cross a handover or a lift, and few enough that a
+  /// server which is genuinely gone is reported as gone within seconds.
+  public static let maxStreamReconnects = 3
 
   /**
    A reader for the next track, opened before anything asks for it.
@@ -697,7 +735,14 @@ public final class PlaybackEngine {
     }
     playback.onReadResumed = { [weak self, weak playback] in
       DispatchQueue.main.async {
-        guard let self, self.activePlayback === playback, self.state == .buffering else { return }
+        guard let self, self.activePlayback === playback else { return }
+        // Reads are flowing again, so whatever outage was being counted is
+        // over and the next one starts with a full budget. Outside the state
+        // guard below deliberately: the budget belongs to the outage, not to
+        // whether the engine happened to be showing `buffering` at the moment
+        // it ended.
+        self.reconnectAttempts = 0
+        guard self.state == .buffering else { return }
         self.state = .playing
         self.publishNowPlaying()
       }
@@ -709,12 +754,122 @@ public final class PlaybackEngine {
     playback.onReadFailed = { [weak self, weak playback] error in
       DispatchQueue.main.async {
         guard let self, self.activePlayback === playback else { return }
+        // A sequential stream gets one more thing tried before the track is
+        // declared lost — see `reconnectStream`. Every other transport has
+        // already exhausted its retries by the time this fires.
+        if self.reconnectStream() { return }
         let title = self.queue.activeTrack?.title ?? "this track"
         self.state = .paused
         self.publishNowPlaying()
         self.emit(.failed("Lost the stream for \(title): \(error)"))
       }
     }
+  }
+
+  /**
+   Pick a transcoded stream back up from where it stopped.
+
+   The sequential transport is the one that cannot retry. `TrackPlayback`'s
+   ladder re-reads, which works on a ranged source because the same bytes can
+   be asked for again — but a stream's bytes were coming from a producer that
+   has since stopped, and reading again only waits on a stream nobody is
+   sending. So the ladder was spending its whole budget on a fault it could
+   not fix, and the track died at the end of it.
+
+   Recovering here means asking the server for the track *again*, from the
+   second reached, with Subsonic's `timeOffset`. That is a different byte
+   stream and so a different reader, which is why this rebuilds rather than
+   seeks — and why `streamURL` existed for a year with no caller: the piece it
+   was written for is this one, and it was never built.
+
+   Returns whether a reconnection was started. False means the caller should
+   report the failure it was going to report.
+   */
+  @discardableResult
+  private func reconnectStream() -> Bool {
+    guard let reader = activeReader, reader.isSequential, reader.sampleRate > 0,
+          let track = queue.activeTrack else { return false }
+    // Live radio has no timeline to come back to. `timeOffset` into a stream
+    // with no beginning is meaningless, and asking for it would restart the
+    // broadcast from wherever the server felt like.
+    guard !track.continuous else { return false }
+    guard reconnectAttempts < Self.maxStreamReconnects else { return false }
+
+    let resumeAt = progress.positionSec
+    // Below a second there is nothing to come back to: the stream failed
+    // before it played, which `beginTrack` reports as an open failure with a
+    // reason, and reconnecting would replace that with a silent retry loop.
+    guard resumeAt >= 1 else { return false }
+
+    reconnectAttempts += 1
+    let offsetSec = Int(resumeAt)
+
+    // Said out loud. A reconnection takes as long as a request, and going
+    // quiet without a word is the behaviour this whole line of work exists to
+    // remove.
+    state = .buffering
+    publishNowPlaying()
+
+    activePlayback?.stopAndWait()
+    openToken &+= 1
+    let token = openToken
+    let factory = self.factory
+
+    openQueue.async { [weak self] in
+      let opened: TrackReader
+      do {
+        let reader = try factory.makeReader(for: track, timeOffsetSeconds: offsetSec)
+        try reader.open()
+        opened = reader
+      } catch {
+        DispatchQueue.main.async {
+          guard let self, self.openToken == token else { return }
+          self.state = .paused
+          self.publishNowPlaying()
+          self.emit(.failed("Lost the stream for \(track.title): \(error)"))
+        }
+        return
+      }
+
+      DispatchQueue.main.async {
+        guard let self, self.openToken == token else { return }
+        // Same reasoning as `beginTrack`: the voice about to play is the one
+        // whose rate has to match the file, and a reconnected stream can come
+        // back at a different rate than it left at if the server chose
+        // differently. Safe here because the playback above was stopped.
+        self.graph.reconnect(self.graph.activeVoice, toSourceRate: opened.sampleRate)
+        self.activeReader = opened
+
+        let frame = Int64(resumeAt * opened.sampleRate)
+        let playback = TrackPlayback(reader: opened, voice: self.graph.activeVoice)
+        self.wire(playback)
+        self.activePlayback = playback
+        playback.onFirstBufferScheduled = { [weak self, weak playback] in
+          DispatchQueue.main.async {
+            guard let self, self.activePlayback === playback,
+                  self.state == .buffering else { return }
+            self.state = .playing
+            self.publishNowPlaying()
+          }
+        }
+        do {
+          // The new reader's frame zero is `frame` of the track — that is what
+          // asking for `timeOffset` bought — so it is seeked to its own
+          // beginning while every position reported carries on from where the
+          // stream broke.
+          try playback.start(atFrame: frame, readerOrigin: frame)
+        } catch {
+          self.activePlayback = nil
+          self.state = .paused
+          self.publishNowPlaying()
+          self.emit(.failed("Lost the stream for \(track.title): \(error)"))
+          return
+        }
+        self.publishNowPlaying()
+        self.startTicking()
+      }
+    }
+    return true
   }
 
   /**
@@ -918,6 +1073,9 @@ public final class PlaybackEngine {
     graph.reconnect(graph.activeVoice, toSourceRate: reader.sampleRate)
 
     activeReader = reader
+    // A new track is a new budget: reconnections spent on the last one say
+    // nothing about this one.
+    reconnectAttempts = 0
     let playback = TrackPlayback(reader: reader, voice: graph.activeVoice)
     wire(playback)
     activePlayback = playback
@@ -1030,6 +1188,12 @@ public final class PlaybackEngine {
 
   func stallActiveTrackForTesting() { activePlayback?.onReadStalled?() }
   func resumeActiveTrackForTesting() { activePlayback?.onReadResumed?() }
+
+  /// Fires the *real* wired failure handler, which is the entry point to the
+  /// reconnection. Not a shortcut past what is being tested: the alternative
+  /// is a test that waits out `TrackPlayback.readRetryBudgetSec`, forty
+  /// seconds of it, to reach the same call.
+  func failActiveTrackForTesting(_ error: Error) { activePlayback?.onReadFailed?(error) }
 
   // MARK: - The crossfade
 

@@ -352,6 +352,19 @@ What it adds, now built as `StreamingByteSource`:
   the source, which would make a seek look cheap when it costs a round trip and
   a rebuffer.
 
+  That layer above went unwritten for as long as this paragraph described it —
+  `streamURL` had no callers at all — and its absence is what made a broken
+  transcode fatal. `TrackPlayback`'s retry ladder re-reads, which recovers a
+  ranged source because the same bytes can be asked for again; on a stream the
+  producer has stopped and reading again waits on nothing. The ladder spent its
+  whole budget on a fault it could not fix. `PlaybackEngine.reconnectStream`
+  is the missing layer: on a read failure over a sequential source it asks the
+  server for the track again from the second reached, up to
+  `maxStreamReconnects` times per outage, with the position carried across by
+  `TrackPlayback.start(atFrame:readerOrigin:)` — the reopened stream's own
+  frame zero is that offset into the track, and only keeping the two apart
+  stops a reconnection throwing the progress bar back to 0:00.
+
 That last cost is accepted rather than hidden. Someone who set a bitrate cap
 chose it, and a slower seek is the honest consequence — better than quietly
 pulling the lossless original over cellular to make seeking feel nicer.
@@ -432,7 +445,11 @@ leaving the flag alone, so the one call that would have restored them was the
 one the guard skipped. The controls were greyed out on every device.
 
 **A function with no callers.** `handleConfigurationChange` was written, was
-correct, committed, shipped, and never invoked.
+correct, committed, shipped, and never invoked. `streamURL` was the same shape
+and lasted longer: the reconnection it exists for was described in §5 as
+something "the layer above" did, and that layer was never built — so the
+document read as though the feature existed. A design note written in the
+present tense is not evidence that anything calls it.
 
 **A stub that accepts and discards.** `setCrossfade` on Android took its
 argument, stored it, and no code read it. The API was complete and the feature

@@ -51,4 +51,13 @@ public protocol TrackReader: AnyObject {
   func cancelPendingReads()
 
   func resumePendingReads()
+
+  /// Whether the bytes behind this reader arrive in order and once — see
+  /// `ByteSource.isSequential`. Forwarded rather than decided here: a reader
+  /// is a parser and has no opinion about transport.
+  var isSequential: Bool { get }
+}
+
+public extension TrackReader {
+  var isSequential: Bool { false }
 }

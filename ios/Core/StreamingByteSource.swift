@@ -101,6 +101,9 @@ public final class StreamingByteSource: ByteSource {
     return max(0, Int64(buffer.count) - offset)
   }
 
+  /// The one source this is true of, and the reason the flag exists.
+  public var isSequential: Bool { true }
+
   public func cancel() {
     lock.lock()
     cancelled = true

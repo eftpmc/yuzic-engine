@@ -64,7 +64,11 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
   }
 
   public func makeReader(for track: Track) throws -> TrackReader {
-    let source = try makeSource(for: track)
+    try makeReader(for: track, timeOffsetSeconds: 0)
+  }
+
+  public func makeReader(for track: Track, timeOffsetSeconds: Int) throws -> TrackReader {
+    let source = try makeSource(for: track, timeOffsetSeconds: timeOffsetSeconds)
 
     // Sniffed from the bytes, not from the URI. A stream URL carries no
     // extension — `/rest/stream.view?id=…` is the same shape whatever the
@@ -137,7 +141,7 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
     return false
   }
 
-  func makeSource(for track: Track) throws -> ByteSource {
+  func makeSource(for track: Track, timeOffsetSeconds: Int = 0) throws -> ByteSource {
     guard let url = URL(string: track.uri) else {
       throw ByteSourceError.fetchFailed("unusable uri: \(track.uri)")
     }
@@ -148,6 +152,17 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
       return CachedByteSource(fetcher: try FileByteFetcher(url: url))
     }
 
+    // A non-zero offset is only ever asked for on a stream that has already
+    // been established as sequential, so the probe below is skipped rather
+    // than repeated. Not just to save the request: if the server answered
+    // with a length this time, the probe would hand back a *seekable* source
+    // whose byte zero is `timeOffsetSeconds` into the track, and every
+    // position the engine computed from it would be wrong by that offset
+    // while looking entirely well-formed.
+    if timeOffsetSeconds > 0 {
+      return streamingSource(url: url, track: track, timeOffsetSeconds: timeOffsetSeconds)
+    }
+
     let fetcher = HTTPByteFetcher(url: url, headers: track.headers)
     do {
       _ = try fetcher.contentLength()
@@ -155,7 +170,7 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
       // The one error that really does mean "transcode in progress": the
       // server is encoding as it sends and cannot say how long the result will
       // be.
-      return streamingSource(url: url, track: track)
+      return streamingSource(url: url, track: track, timeOffsetSeconds: timeOffsetSeconds)
     } catch {
       // Everything else is a broken server, an expired token or a timeout, and
       // catching them all here turned each into a silent downgrade: the track
@@ -167,7 +182,7 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
     }
 
     if fetcher.rangesSupported == false {
-      return streamingSource(url: url, track: track)
+      return streamingSource(url: url, track: track, timeOffsetSeconds: timeOffsetSeconds)
     }
 
     let source = CachedByteSource(fetcher: fetcher, cache: cache, cacheId: track.id)
@@ -180,12 +195,21 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
     return source
   }
 
-  private func streamingSource(url: URL, track: Track) -> ByteSource {
-    let seconds = track.durationSec ?? 0
+  private func streamingSource(
+    url: URL, track: Track, timeOffsetSeconds: Int = 0
+  ) -> ByteSource {
+    // What is left of the track, not all of it: a stream restarted 90 seconds
+    // in is 90 seconds shorter, and the estimate is what the parser is told
+    // the file weighs. Handing it the whole duration made a reconnected
+    // stream claim bytes that were never going to arrive.
+    let seconds = max(0, (track.durationSec ?? 0) - Double(timeOffsetSeconds))
     let estimate = seconds > 0
       ? Int64(seconds * Self.assumedBitrate / 8)
       : Int64(64 * 1024 * 1024)
-    let producer = HTTPStreamProducer(url: url, headers: track.headers)
+    let producer = HTTPStreamProducer(
+      url: streamURL(base: url, timeOffsetSeconds: timeOffsetSeconds),
+      headers: track.headers
+    )
     return StreamingByteSource(producer: producer, estimatedBytes: estimate)
   }
 

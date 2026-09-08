@@ -199,6 +199,8 @@ public final class OpusFileReader: TrackReader {
     return Int64(Double(bytesAhead) * (Double(totalFrames) / Double(totalBytes)))
   }
 
+  public var isSequential: Bool { source.isSequential }
+
   public func cancelPendingReads() { source.cancel() }
   public func resumePendingReads() { source.resume() }
 
