@@ -224,4 +224,85 @@ final class VorbisFileReaderTests: XCTestCase {
     let reader = VorbisFileReader(source: MemorySource(Data(repeating: 0x41, count: 8192)))
     XCTAssertThrowsError(try reader.open())
   }
+
+  // MARK: - A source that stops serving is not a file that ended
+
+  /// See `OpusFileReaderTests.FlakySource` — the same fault lives in both
+  /// readers, because both talk to a C library through a callback that reads
+  /// 0 as end of stream. The switch is thrown after `open()`, which is the
+  /// real shape of it: headers on a working connection, a stall during play.
+  private final class FlakySource: ByteSource {
+    enum Mode { case serving, throwsFetchFailed, throwsCancelled, returnsEmpty }
+
+    private let blob: Data
+    var mode: Mode = .serving
+
+    init(_ blob: Data) { self.blob = blob }
+
+    func totalBytes() throws -> Int64 { Int64(blob.count) }
+
+    func read(offset: Int64, count: Int) throws -> Data {
+      switch mode {
+      case .throwsFetchFailed: throw ByteSourceError.fetchFailed("stalled")
+      case .throwsCancelled: throw ByteSourceError.cancelled
+      case .returnsEmpty: return Data()
+      case .serving:
+        let start = min(Int(offset), blob.count)
+        return blob.subdata(in: start..<min(start + count, blob.count))
+      }
+    }
+
+    func availableBytes(from offset: Int64) -> Int64 { max(0, Int64(blob.count) - offset) }
+    func cancel() {}
+    func resume() {}
+  }
+
+  private func drain(_ reader: VorbisFileReader) -> Error? {
+    for _ in 0..<512 {
+      do {
+        guard let buffer = try reader.read(frames: 4096), buffer.frameLength > 0 else {
+          return nil
+        }
+      } catch {
+        return error
+      }
+    }
+    return nil
+  }
+
+  /**
+   Opens on a working source, decodes a little, and only then stalls.
+
+   The fixture is long for a unit test on purpose. At two seconds the whole
+   file is ~9.5KB and vorbisfile has read every byte of it before the first
+   buffer comes back, so the stall lands *at* the end and the reader is right
+   to call it the end — a test written that way passes whatever the code does.
+   Thirty seconds leaves plenty of file unread when the source stops serving.
+   */
+  private func stalling(_ mode: FlakySource.Mode) throws -> (VorbisFileReader, Error?) {
+    let source = FlakySource(encodeTone(seconds: 30))
+    let reader = VorbisFileReader(source: source)
+    try reader.open()
+
+    let first = try reader.read(frames: 4096)
+    XCTAssertNotNil(first, "the fixture did not decode before the stall was introduced")
+
+    source.mode = mode
+    return (reader, drain(reader))
+  }
+
+  func testAStalledSourceThrowsRatherThanReadingAsTheEnd() throws {
+    let (_, error) = try stalling(.throwsFetchFailed)
+    XCTAssertNotNil(error, "a source that stopped serving reported the file as finished")
+  }
+
+  func testASourceServingNothingBeforeTheEndThrows() throws {
+    let (_, error) = try stalling(.returnsEmpty)
+    XCTAssertNotNil(error, "an empty read before the end reported the file as finished")
+  }
+
+  func testACancelledReadIsStillTreatedAsTheEnd() throws {
+    let (_, error) = try stalling(.throwsCancelled)
+    XCTAssertNil(error, "a deliberate cancellation was raised as a failure")
+  }
 }

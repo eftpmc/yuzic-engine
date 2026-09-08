@@ -43,6 +43,22 @@ public final class VorbisFileReader: TrackReader {
   /// itself, so this is the callbacks' cursor rather than a playback position.
   private var byteOffset: Int64 = 0
 
+  /**
+   Why the stream callback stopped serving bytes, when it was not the end.
+
+   `readBytes` is a C callback and cannot throw: vorbisfile reads 0 as end of
+   stream, exactly as `fread` does, and there is no other way out of it. So a
+   failure is recorded here and raised by `read` on the way back up.
+
+   See `OpusFileReader.sourceFailure` — the same fault, and the same one
+   `AudioFileReader.readProc` carried before it: a stalled network read is
+   indistinguishable from a finished file unless something carries the
+   difference across the callback boundary.
+
+   Touched only from the decode queue, like `byteOffset`.
+   */
+  private var sourceFailure: Error?
+
   public private(set) var totalFrames: Int64 = 0
   public private(set) var sampleRate: Double = 0
   public private(set) var channelCount: UInt32 = 0
@@ -130,6 +146,14 @@ public final class VorbisFileReader: TrackReader {
       let wanted = Int32(min(frames - filled, 4096))
       let decoded = ov_read_float(&file, &pcm, wanted, nil)
 
+      // Asked before `decoded` is interpreted: a source that could not serve
+      // makes vorbisfile report a clean end of stream, so 0 here means "the
+      // file ended" only once this is nil.
+      if let failure = sourceFailure {
+        sourceFailure = nil
+        throw failure
+      }
+
       if decoded == 0 { break }                      // end of stream
       if decoded < 0 { throw VorbisError.readFailed(Int32(decoded)) }
       guard let pcm else { break }
@@ -176,9 +200,31 @@ public final class VorbisFileReader: TrackReader {
   ) -> Int {
     guard let buffer, size > 0, count > 0 else { return 0 }
     let wanted = size * count
-    guard let data = try? source.read(offset: byteOffset, count: wanted), !data.isEmpty else {
+
+    let data: Data
+    do {
+      data = try source.read(offset: byteOffset, count: wanted)
+    } catch ByteSourceError.cancelled {
+      // Abandoned on purpose by a seek. Unwinding as end of stream is right
+      // here, and there is nothing to report.
+      return 0
+    } catch {
+      sourceFailure = error
       return 0
     }
+
+    if data.isEmpty {
+      // Empty *at or past* the end is the end. Empty before it is a source
+      // that could not serve, which must not read as the song finishing.
+      let total = (try? source.totalBytes()) ?? 0
+      if !(total > 0 && byteOffset >= total) {
+        sourceFailure = ByteSourceError.fetchFailed(
+          "empty read at \(byteOffset) of \(total)"
+        )
+      }
+      return 0
+    }
+
     data.copyBytes(to: buffer.assumingMemoryBound(to: UInt8.self), count: data.count)
     byteOffset += Int64(data.count)
     // Returns whole *items*, as fread does — vorbisfile calls it with size 1,

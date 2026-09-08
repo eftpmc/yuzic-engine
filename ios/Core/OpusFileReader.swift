@@ -41,6 +41,35 @@ public final class OpusFileReader: TrackReader {
   private var file: OpaquePointer?
   private var byteOffset: Int64 = 0
 
+  /**
+   Why the stream callback stopped serving bytes, when it was not the end.
+
+   `readBytes` is a C callback and cannot throw: opusfile reads 0 as end of
+   stream, and there is no other way out of it. So a failure is recorded here
+   and raised by `read` on the way back up, which is the first place a Swift
+   error can exist again.
+
+   Without it a stalled network reads exactly like a finished file — the same
+   fault `AudioFileReader.readProc` carried, where a stall was relabelled
+   end-of-file before it left the callback and the engine advanced to the next
+   track with nothing thrown anywhere. Only the Core Audio path was fixed;
+   this is the same bug in the Ogg path.
+
+   Touched only from the decode queue, like `byteOffset`.
+   */
+  private var sourceFailure: Error?
+
+  /**
+   Whether the callback returned 0 because a read was cancelled on purpose.
+
+   Carried separately from `sourceFailure` because the two unwind differently:
+   a failure is raised, a cancellation is the end of the read and nothing more.
+   Needed because opusfile does not take a mid-stream 0 as a clean end of
+   stream the way vorbisfile does — it reports `OP_EBADLINK`, which without
+   this would surface a deliberate seek as a decode error.
+   */
+  private var sourceCancelled = false
+
   public private(set) var totalFrames: Int64 = 0
   public private(set) var sampleRate: Double = 0
   public private(set) var channelCount: UInt32 = 0
@@ -128,6 +157,21 @@ public final class OpusFileReader: TrackReader {
         op_read_float(file, raw.baseAddress, Int32(min(raw.count, room * channelCount)), nil)
       }
 
+      // Asked before `decoded` is interpreted: a source that could not serve
+      // makes opusfile report a clean end of stream, so 0 here means "the file
+      // ended" only once this is nil.
+      if let failure = sourceFailure {
+        sourceFailure = nil
+        throw failure
+      }
+
+      // Before `decoded` is judged at all: a cancelled read reaches opusfile
+      // as a 0 and comes back as OP_EBADLINK, which is not a broken file.
+      if sourceCancelled {
+        sourceCancelled = false
+        break
+      }
+
       if decoded == 0 { break }
       if decoded < 0 { throw OpusError.readFailed(decoded) }
 
@@ -162,9 +206,33 @@ public final class OpusFileReader: TrackReader {
 
   private func readBytes(into buffer: UnsafeMutablePointer<UInt8>?, count: Int32) -> Int32 {
     guard let buffer, count > 0 else { return 0 }
-    guard let data = try? source.read(offset: byteOffset, count: Int(count)), !data.isEmpty else {
+
+    let data: Data
+    do {
+      data = try source.read(offset: byteOffset, count: Int(count))
+    } catch ByteSourceError.cancelled {
+      // Abandoned on purpose by a seek. Not a failure — but opusfile will turn
+      // the 0 into OP_EBADLINK, so it has to be remembered to be told apart
+      // from a real decode error on the way back up.
+      sourceCancelled = true
+      return 0
+    } catch {
+      sourceFailure = error
       return 0
     }
+
+    if data.isEmpty {
+      // Empty *at or past* the end is the end. Empty before it is a source
+      // that could not serve, which must not read as the song finishing.
+      let total = (try? source.totalBytes()) ?? 0
+      if !(total > 0 && byteOffset >= total) {
+        sourceFailure = ByteSourceError.fetchFailed(
+          "empty read at \(byteOffset) of \(total)"
+        )
+      }
+      return 0
+    }
+
     data.copyBytes(to: buffer, count: data.count)
     byteOffset += Int64(data.count)
     return Int32(data.count)
