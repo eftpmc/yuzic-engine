@@ -419,9 +419,11 @@ config plugin's Info.plist scene entry lands only on a prebuild.
 Not a design decision — a record. The serious defects here have kept arriving in
 the same shape, and it is worth naming because it is not the shape most review
 looks for. Nothing below threw. Nothing below failed a test suite. Seven of the
-nine are code that ran, returned, and accomplished nothing. The other two are
-the same idea one level up: one where what accomplished nothing was the
-handover, one where it was the API boundary.
+ten are code that ran, returned, and accomplished nothing. Two are the same idea
+one level up: one where what accomplished nothing was the handover, one where it
+was the API boundary. The tenth is a step further out again — code that was
+correct, and a *test* that ran, passed, and proved nothing, because it exercised
+a different decoder from the one the fault lived in.
 
 **A guard that guards nothing.** `remoteCommandsEnabled` re-registered the lock
 screen's targets only when the value changed. Correct in isolation; the previous
@@ -511,8 +513,29 @@ meant nothing at all. It is the same shape as a function with no callers, moved
 out to the boundary between two codebases — where it is harder to see, because
 each side is complete and only the join is empty.
 
-The common thread is that all nine are invisible to "does it return, and is the
-return value right". What catches them is asking what the code *did* — which
+**A fix verified on the wrong parser.** The tenth, and the one that took four
+attempts to land. A stalled network read was being reported as the end of the
+file, so tracks cut off part-way through and the engine advanced — heard as
+songs skipping themselves. `AudioFileReader.readProc` was fixed to answer a
+failed read with `kAudioFilePositionError` rather than `kAudioFileEndOfFileError`,
+and the fix was proven against a WAV fixture. WAV's parser is a header and a
+block of samples: an error has nowhere to go but up. **Core Audio's FLAC parser
+absorbs it** and returns `noErr` with zero frames, which `read` cannot
+distinguish from a file that ended — so the fault survived, unchanged, in the
+only format it had ever been reported in. Lossless is what people stream over
+cellular; WAV is what the test happened to use.
+
+The same swallow existed twice more, in `VorbisFileReader` and
+`OpusFileReader`, where `try? source.read(...)` returned 0 to a C callback that
+reads 0 as end of stream. Four places, one lesson: **a callback that cannot
+throw will lose the difference between "could not read" and "finished" unless
+something is written to carry it across** — and proving that on one decoder
+proves nothing about the next. Each reader now records the reason on the way
+down and raises it on the way back up, and the tests run one stall through both
+formats so the asymmetry cannot come back silently.
+
+The common thread is that all of these are invisible to "does it return, and is
+the return value right". What catches them is asking what the code *did* — which
 call ran, which caller reached it, what the user then heard. `Tools/mutate.py`
 automates one slice of this: break a real behaviour, and see whether any test
 notices.
