@@ -163,4 +163,45 @@ final class StreamingByteSourceTests: XCTestCase {
     let base = URL(string: "https://music.example/rest/stream.view?id=42")!
     XCTAssertEqual(streamURL(base: base, timeOffsetSeconds: 0), base)
   }
+
+  /**
+   A stream that stops arriving fails the read instead of hanging on it.
+
+   This is the defect that survived every other fix in this file's history. The
+   wait was unbounded, so a read past the write head parked the decode thread
+   on the condition variable and never returned — throwing nothing, returning
+   nothing. `TrackPlayback` only retries a read that *throws* and only ends a
+   track on a read that returns *nil*; this produced neither, so the retry
+   ladder never ran, the stall signal never fired, and the engine kept
+   reporting `.playing` to a listener hearing silence.
+
+   Driven with a producer that delivers a little and then goes quiet, which is
+   what a transcode does when the connection under it dies.
+   */
+  func testAReadPastAStalledWriteHeadFailsRatherThanHanging() throws {
+    final class SilentProducer: StreamProducer {
+      private var onData: ((Data) -> Void)?
+      func begin(onData: @escaping (Data) -> Void, onFinish: @escaping (Error?) -> Void) {
+        self.onData = onData
+        onData(Data(repeating: 0xAA, count: 1024))
+        // and then nothing, forever
+      }
+      func stop() {}
+    }
+
+    let source = StreamingByteSource(
+      producer: SilentProducer(), estimatedBytes: 1_000_000, readWaitTimeout: 0.6)
+    // Served from what arrived: not a wait at all.
+    XCTAssertEqual(try source.read(offset: 0, count: 512).count, 512)
+
+    let started = Date()
+    XCTAssertThrowsError(try source.read(offset: 4096, count: 512)) { error in
+      guard case ByteSourceError.fetchFailed = error else {
+        return XCTFail("expected a fetch failure, got \(error)")
+      }
+    }
+    let waited = Date().timeIntervalSince(started)
+    XCTAssertGreaterThan(waited, 0.4, "returned without waiting for the stream at all")
+    XCTAssertLessThan(waited, 5, "the wait is still effectively unbounded")
+  }
 }

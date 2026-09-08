@@ -35,8 +35,30 @@ public protocol StreamProducer: AnyObject {
  */
 public final class StreamingByteSource: ByteSource {
 
+  /**
+   How long a read may wait for the write head to reach it.
+
+   The wait used to be unbounded, and that is the fault this class shipped
+   with: a read past what has arrived parked the decode thread on the
+   condition variable and never came back. It threw nothing and returned
+   nothing, so `TrackPlayback`'s retry ladder never ran, the stall signal never
+   fired, and the engine went on reporting `.playing` while the buffered audio
+   drained and the track fell silent. Every fix aimed at "a failed read must
+   not look like the end of a file" missed it, because this path produces
+   neither a failure nor an end.
+
+   Twelve seconds is longer than any healthy gap between chunks — the producer
+   delivers continuously once a transcode is running — and short enough that
+   the machinery above can react while the listener is still waiting.
+   */
+  public static let readWaitTimeoutSec: TimeInterval = 12
+
   private let producer: StreamProducer
   private let estimatedBytes: Int64
+  /// Instance rather than static so a test can reach the give-up path in
+  /// milliseconds — the real budget is deliberately long, and a suite that
+  /// waits it out is a suite people stop running.
+  private let readWaitTimeout: TimeInterval
 
   private let lock = NSCondition()
   private var buffer = Data()
@@ -55,9 +77,14 @@ public final class StreamingByteSource: ByteSource {
    end-of-file, whereas under-reporting makes it stop early and truncate the
    track.
    */
-  public init(producer: StreamProducer, estimatedBytes: Int64) {
+  public init(
+    producer: StreamProducer,
+    estimatedBytes: Int64,
+    readWaitTimeout: TimeInterval = StreamingByteSource.readWaitTimeoutSec
+  ) {
     self.producer = producer
     self.estimatedBytes = max(1, estimatedBytes)
+    self.readWaitTimeout = readWaitTimeout
   }
 
   deinit { producer.stop() }
@@ -95,9 +122,18 @@ public final class StreamingByteSource: ByteSource {
 
     let wantedEnd = offset + Int64(count)
     // Wait for the write head to pass what was asked for. A reader slightly
-    // ahead of the download is the normal case, not an error.
+    // ahead of the download is the normal case, not an error — but only for
+    // as long as the stream is actually moving. Bounded, because an unbounded
+    // wait here is indistinguishable from a hung player: see
+    // `readWaitTimeoutSec`.
+    let deadline = Date().addingTimeInterval(readWaitTimeout)
     while Int64(buffer.count) < wantedEnd && !finished && !cancelled && failure == nil {
-      lock.wait()
+      if !lock.wait(until: deadline) {
+        throw ByteSourceError.fetchFailed(
+          "stream did not reach \(wantedEnd) within \(readWaitTimeout)s "
+          + "(have \(buffer.count))"
+        )
+      }
     }
 
     if cancelled { throw ByteSourceError.cancelled }
