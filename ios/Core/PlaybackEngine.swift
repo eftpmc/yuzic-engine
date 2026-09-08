@@ -50,6 +50,20 @@ public final class PlaybackEngine {
   private var incomingTrack: Track?
 
   /**
+   Whether a fade is actually ramping, as opposed to being prepared.
+
+   `transitioning` covers both, because it exists to stop the ticker starting
+   a second transition. Once the crossfade's reader began being fetched
+   asynchronously, that flag started covering a state it was never written for
+   — "still fetching, nothing started" — and `handleTrackFinished` was reading
+   it as "a fade is running, it will handle the handover". On a link where the
+   fetch takes longer than the fade is long, the track ended, nothing
+   advanced, and the listener got silence until the fetch landed and started a
+   fade against a track that was already over.
+   */
+  private var fading = false
+
+  /**
    Where readers are opened.
 
    `open()` is a network round trip for a remote track, and everything that
@@ -828,7 +842,13 @@ public final class PlaybackEngine {
    */
   private func handleTrackFinished(_ finished: TrackPlayback?) {
     DispatchQueue.main.async { [weak self] in
-      guard let self, !self.transitioning else { return }
+      guard let self else { return }
+      // Only a fade that is *running* handles the handover. One that is still
+      // being prepared has to be abandoned, or the queue never advances.
+      if self.fading { return }
+      if self.transitioning {
+        self.cancelTransition()
+      }
       guard finished == nil || finished === self.activePlayback else { return }
       let listened = self.listenedSeconds()
       // Asks the queue rather than adding one, so repeat is honoured in the
@@ -839,6 +859,14 @@ public final class PlaybackEngine {
       try? self.beginTrack(at: next, fromFrame: 0, previousListenedSec: listened)
     }
   }
+
+  // Test seams: driving these through real timing would need a track long
+  // enough to fade and a link slow enough to lose the race.
+  func beginTransitionForTesting(over duration: TimeInterval) { beginTransition(over: duration) }
+  /// Drops the preloaded reader, so a test can reach the path where the
+  /// crossfade has to fetch for itself.
+  func discardPreloadForTesting() { preparedNext = nil }
+  func finishActiveTrackForTesting() { handleTrackFinished(activePlayback) }
 
   // MARK: - The crossfade
 
@@ -981,6 +1009,18 @@ public final class PlaybackEngine {
     guard let next = queue.nextTrack else { return }
     transitioning = true
 
+    // Already open? Then the fade starts on time. The crossfade used to do its
+    // own fetch twelve seconds before the end, which is only early enough if
+    // the fetch takes less than twelve seconds — on a slow link it does not,
+    // and the fade never happens: the track ends, and the next one is opened
+    // from scratch into the silence. Reported as a long gap between tracks on
+    // an album that was otherwise playing fine.
+    if let prepared = preparedNext, prepared.id == next.id {
+      preparedNext = nil
+      continueTransition(over: duration, next: next, reader: prepared.reader)
+      return
+    }
+
     // Off the main thread, like a skip. This runs from the ticker, which is
     // scheduled on `RunLoop.main`, so opening inline froze the interface at
     // the start of every crossfade — the one moment a listener is most likely
@@ -1019,6 +1059,7 @@ public final class PlaybackEngine {
 
       // Equal power on both halves: two tracks are audible together here,
       // and linear ramps would sum to a hole in the middle of the crossover.
+      fading = true
       graph.fade(graph.idleVoice, to: 1, over: duration, curve: .equalPower)
       graph.fade(graph.activeVoice, to: 0, over: duration, curve: .equalPower) { [weak self] in
         outgoing?.stop()
@@ -1039,6 +1080,7 @@ public final class PlaybackEngine {
         self.listenedAccumulated = duration / 2
         self.listeningSince = self.now()
         self.transitioning = false
+        self.fading = false
         self.emit(.trackChanged(index: self.queue.activeIndex, id: next.id,
                                 previousListenedSec: listened))
         self.publishNowPlaying()
@@ -1052,6 +1094,7 @@ public final class PlaybackEngine {
   private func cancelTransition() {
     guard transitioning else { return }
     transitioning = false
+    fading = false
     // A fade whose reader is still being fetched has to be abandoned too, or
     // it lands after the thing that cancelled it and starts a crossfade into a
     // track that is no longer next.

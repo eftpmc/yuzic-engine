@@ -75,7 +75,12 @@ final class TrackPlaybackFailureTests: XCTestCase {
 
   func testAFailingReadReportsFailureAndNotTheEndOfTheTrack() throws {
     let reader = ScriptedReader(successes: 2, then: .throwsForever)
-    let playback = TrackPlayback(reader: reader, voice: try voice())
+    // A short ladder: this is about *which* path is taken, not how patient it
+    // is. The real budget is deliberately ~33s and waiting it out here would
+    // make the suite slow enough that people stop running it.
+    let playback = TrackPlayback(
+      reader: reader, voice: try voice(), retries: 3, retryDelaySec: 0.01
+    )
 
     var endedCalled = false
     let failed = expectation(description: "read failure reported")
@@ -91,7 +96,9 @@ final class TrackPlaybackFailureTests: XCTestCase {
 
   func testAFailingReadIsRetriedBeforeBeingGivenUpOn() throws {
     let reader = ScriptedReader(successes: 1, then: .throwsForever)
-    let playback = TrackPlayback(reader: reader, voice: try voice())
+    let playback = TrackPlayback(
+      reader: reader, voice: try voice(), retries: 3, retryDelaySec: 0.01
+    )
 
     let failed = expectation(description: "gave up eventually")
     playback.onReadFailed = { _ in failed.fulfill() }
@@ -100,7 +107,7 @@ final class TrackPlaybackFailureTests: XCTestCase {
 
     // One good read, then the failing one and its retries. A single attempt
     // would abandon a track for a blip that the next request would have served.
-    XCTAssertGreaterThan(reader.reads, 1 + TrackPlayback.readRetries,
+    XCTAssertGreaterThan(reader.reads, 1 + 3,
                          "the failing read should have been retried, not abandoned")
   }
 

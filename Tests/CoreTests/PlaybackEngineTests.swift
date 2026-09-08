@@ -139,7 +139,11 @@ final class PlaybackEngineTests: XCTestCase {
     factory.onMakeReader = { id in
       guard id == "b" else { return }
       opening.signal()
-      release.wait()
+      // Bounded. An unbounded wait here holds the open queue forever when the
+      // test fails before signalling — which wedged a `swift test` run for two
+      // hours and kept the SwiftPM lock with it, so every later build sat
+      // behind a test that had already failed.
+      _ = release.wait(timeout: .now() + 10)
     }
 
     try engine.skipToNext()
@@ -210,6 +214,56 @@ final class PlaybackEngineTests: XCTestCase {
     // The threshold has to be reachable, or the feature never runs at all:
     // `bufferedFramesAhead` reports the read window, measured at ~2.2s here.
     XCTAssertLessThanOrEqual(PlaybackEngine.preloadAfterBufferedSec, 2.2)
+  }
+
+  /**
+   A track that ends while the crossfade is still fetching still advances.
+
+   `transitioning` exists to stop the ticker starting a second fade, and
+   `handleTrackFinished` read it as "a fade is running, it will hand over".
+   That was true while the crossfade's reader was opened synchronously — the
+   flag and a running fade were the same thing. Opening it asynchronously
+   split them, and on a link where the fetch takes longer than the fade is
+   long, the track ended into a flag that said someone else was handling it.
+   Nobody was: reported as a long silence after a song, and then the next one
+   arriving with no crossfade at all, because the fade finally started against
+   a track that was already over.
+   */
+  func testATrackEndingWhileTheFadeIsStillLoadingStillAdvances() throws {
+    let (engine, factory, _) = try makeEngine()
+    engine.setQueue([song("a"), song("b")], startIndex: 0)
+    try engine.play()
+    settle(timeout: 5) { engine.isNextPreloaded }
+    // Drop it: this test is about the path where the crossfade has to fetch
+    // for itself, which is where the flag and a running fade come apart.
+    engine.discardPreloadForTesting()
+
+    // Hold the crossfade's own fetch open, the way a slow link would.
+    let fetching = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    factory.onMakeReader = { id in
+      guard id == "b" else { return }
+      fetching.signal()
+      // Bounded. An unbounded wait here holds the open queue forever when the
+      // test fails before signalling — which wedged a `swift test` run for two
+      // hours and kept the SwiftPM lock with it, so every later build sat
+      // behind a test that had already failed.
+      _ = release.wait(timeout: .now() + 10)
+    }
+
+    var advancedTo: Int?
+    engine.onEvent = { if case .trackChanged(let index, _, _) = $0 { advancedTo = index } }
+
+    // A fade that is merely being prepared must not swallow the end of track.
+    engine.beginTransitionForTesting(over: 12)
+    _ = fetching.wait(timeout: .now() + 3)
+    engine.finishActiveTrackForTesting()
+
+    settle { advancedTo == 1 }
+    release.signal()
+
+    XCTAssertEqual(advancedTo, 1,
+                   "the queue must advance rather than wait on a fade that never started")
   }
 
   // MARK: - Volume, and the node it is allowed to touch

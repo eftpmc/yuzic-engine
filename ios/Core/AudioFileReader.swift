@@ -276,19 +276,36 @@ public final class AudioFileReader: TrackReader {
       let data = try reader.source.read(offset: position, count: Int(requestCount))
       if data.isEmpty {
         actualCount.pointee = 0
-        return kAudioFileEndOfFileError
+        // Empty *at or past* the end is the end. Empty before it is a source
+        // that could not serve the bytes, which is a different thing entirely
+        // and must not be reported as the song finishing.
+        let total = (try? reader.source.totalBytes()) ?? 0
+        return total > 0 && position >= total
+          ? kAudioFileEndOfFileError
+          : kAudioFilePositionError
       }
       data.withUnsafeBytes { raw in
         buffer.copyMemory(from: raw.baseAddress!, byteCount: data.count)
       }
       actualCount.pointee = UInt32(data.count)
       return noErr
+    } catch ByteSourceError.cancelled {
+      actualCount.pointee = 0
+      // A cancelled read is not a corrupt file — a seek abandons the read in
+      // flight on purpose. Reporting end-of-file lets the parser unwind
+      // cleanly instead of surfacing a decode error the caller would have to
+      // distinguish from a genuinely broken track.
+      return kAudioFileEndOfFileError
     } catch {
       actualCount.pointee = 0
-      // A cancelled read is not a corrupt file. Reporting end-of-file lets the
-      // parser unwind cleanly instead of surfacing a decode error the caller
-      // would have to distinguish from a genuinely broken track.
-      return kAudioFileEndOfFileError
+      // Everything else is a failure to read, and reporting it as the end of
+      // the file is what made a stalled network indistinguishable from a song
+      // ending. The engine took the end-of-file at face value and advanced —
+      // no error anywhere, nothing thrown, the track simply "finished" a
+      // minute in. Every fix upstream of here was invisible to it, because the
+      // failure had already been relabelled as success before it left this
+      // callback.
+      return kAudioFilePositionError
     }
   }
 

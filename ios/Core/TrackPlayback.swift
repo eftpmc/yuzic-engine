@@ -22,10 +22,26 @@ public final class TrackPlayback {
   public static let bufferFrames: AVAudioFrameCount = 22_050
   public static let targetBuffersAhead = 4
 
-  /// How many times a failing read is retried before the track is given up on.
-  public static let readRetries = 5
-  /// Base delay between retries; multiplied by the attempt number.
+  /**
+   How many times a failing read is retried before the track is given up on.
+
+   Twenty, with the delay below, is a little over half a minute of trying. The
+   first version allowed five over 3.75 seconds, which is not a stall on a
+   patchy cellular link — it is a blink, and giving up inside it turned a
+   momentary drop into a paused player a minute into a song. A listener will
+   forgive a gap far longer than they will forgive having to press play again.
+   */
+  public static let readRetries = 20
+  /// Base delay, multiplied by the attempt and capped, so the ladder backs off
+  /// without the last rungs becoming minutes apart.
   public static let readRetryDelaySec: TimeInterval = 0.25
+  public static let readRetryMaxDelaySec: TimeInterval = 2.0
+
+  /// Fires the first time a read fails, so the engine can say it is waiting
+  /// rather than go quiet while pretending to play.
+  public var onReadStalled: (() -> Void)?
+  /// Fires when reads recover, so it can say so again.
+  public var onReadResumed: (() -> Void)?
 
   private let reader: TrackReader
   private let voice: AudioGraph.Voice
@@ -68,9 +84,24 @@ public final class TrackPlayback {
    */
   public var onReadFailed: ((Error) -> Void)?
 
-  public init(reader: TrackReader, voice: AudioGraph.Voice, label: String = "decode") {
+  /// This playback's retry ladder. Instance rather than static so a test can
+  /// drive the give-up path in milliseconds instead of waiting out the real
+  /// half-minute — the budget is deliberately long, and a suite that waits for
+  /// it is a suite people stop running.
+  private let retries: Int
+  private let retryDelaySec: TimeInterval
+
+  public init(
+    reader: TrackReader,
+    voice: AudioGraph.Voice,
+    label: String = "decode",
+    retries: Int = TrackPlayback.readRetries,
+    retryDelaySec: TimeInterval = TrackPlayback.readRetryDelaySec
+  ) {
     self.reader = reader
     self.voice = voice
+    self.retries = retries
+    self.retryDelaySec = retryDelaySec
     self.queue = DispatchQueue(label: "dev.yuzic.engine.\(label)", qos: .userInitiated)
   }
 
@@ -179,7 +210,11 @@ public final class TrackPlayback {
         let buffer: AVAudioPCMBuffer?
         do {
           buffer = try self.reader.read(frames: Self.bufferFrames)
-          self.lock.lock(); self.consecutiveFailures = 0; self.lock.unlock()
+          self.lock.lock()
+          let wasStalled = self.consecutiveFailures > 0
+          self.consecutiveFailures = 0
+          self.lock.unlock()
+          if wasStalled { self.onReadResumed?() }
         } catch {
           // A read that throws is a *failure*, not an end. This used to set
           // `reachedEnd` and the track reported a normal completion, so a
@@ -195,15 +230,18 @@ public final class TrackPlayback {
           self.lock.unlock()
           if givenUp { return }
 
-          if attempt <= Self.readRetries {
+          if attempt == 1 { self.onReadStalled?() }
+
+          if attempt <= self.retries {
             // Re-dispatched rather than slept. Sleeping holds the decode
             // queue, and `stopAndWait` does `queue.sync {}` from the main
             // thread — so a backoff would block the interface for its whole
             // length, which is the fault this engine has just finished
             // removing from two other paths.
-            self.queue.asyncAfter(
-              deadline: .now() + Self.readRetryDelaySec * Double(attempt)
-            ) { [weak self] in
+            let delay = min(
+              self.retryDelaySec * Double(attempt), Self.readRetryMaxDelaySec
+            )
+            self.queue.asyncAfter(deadline: .now() + delay) { [weak self] in
               self?.fill()
             }
             return
