@@ -639,6 +639,48 @@ final class PlaybackEngineTests: XCTestCase {
     XCTAssertEqual(seen, [.buffering, .playing], "the host was not told either way")
   }
 
+  /**
+   Play works again after the thing that was playing has died.
+
+   Reported from a phone: an AirPod ran out of battery mid-track, and after it
+   disconnected the song could not be started again at all.
+
+   `resume()` cannot revive a stopped `TrackPlayback` — it calls `play()` on the
+   node and then `fill()`, which returns immediately once `stopped` is set. So
+   the engine sat holding something that could never sound again, and `play()`
+   kept resuming it. Two ordinary paths leave one behind: a stream that failed
+   after its retry budget, and a configuration change whose graph rebuild threw
+   after stopping the old playback.
+
+   Driven through `stopActivePlaybackForTesting` rather than by pulling a real
+   Bluetooth device, because what is being tested is the engine's response to a
+   dead playback, not how it got one.
+   */
+  func testPlayRestartsAPlaybackThatCanNoLongerSound() throws {
+    let (engine, _, _) = try makeEngine()
+
+    engine.setQueue([song("a")], startIndex: 0)
+    try engine.play()
+
+    let playing = expectation(description: "reaches playing before the device dies")
+    let deadline = Date().addingTimeInterval(5)
+    DispatchQueue.global().async {
+      while Date() < deadline && engine.state != .playing { usleep(10_000) }
+      playing.fulfill()
+    }
+    wait(for: [playing], timeout: 6)
+
+    engine.stopActivePlaybackForTesting()
+    XCTAssertTrue(engine.activePlaybackIsFinishedForTesting,
+                  "the fixture did not leave a stopped playback behind")
+
+    try engine.play()
+
+    XCTAssertFalse(engine.activePlaybackIsFinishedForTesting,
+                   "play resumed the dead playback instead of starting a live one")
+    XCTAssertNotEqual(engine.state, .idle)
+  }
+
   func testSkippingMovesTheQueueAndOpensTheNewTrack() throws {
     let (engine, factory, _) = try makeEngine()
     engine.setQueue([song("a"), song("b"), song("c")], startIndex: 0)

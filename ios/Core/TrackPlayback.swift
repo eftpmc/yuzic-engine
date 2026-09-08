@@ -118,6 +118,29 @@ public final class TrackPlayback {
    buffer depth, and reporting the former would put the progress bar two seconds
    into the future.
    */
+  /**
+   Whether this playback can still produce audio.
+
+   `resume()` on a finished one is silence: it calls `play()` on the node and
+   then `fill()`, which returns immediately because `stopped` is set. Nothing
+   throws and nothing recovers, so a caller that resumes rather than restarts
+   has no way back. The engine asks this before choosing which to do.
+   */
+  public var isFinished: Bool {
+    lock.lock(); defer { lock.unlock() }
+    return stopped || reachedEnd
+  }
+
+  /**
+   The last position the node reported, for when it can no longer be asked.
+
+   `lastRenderTime` stops carrying a valid time once the node is stopped, and
+   the fallback below is `startFrame` — where this playback *began*. For a
+   track that has been playing for three minutes that is three minutes wrong,
+   and it is exactly the number a restart needs to be right.
+   */
+  private var lastKnownFrame: Int64 = 0
+
   public var currentFrame: Int64 {
     // `playerTime(forNodeTime:)` is not merely optional-returning: it asserts
     // that the time it is handed carries a valid sample or host time, and
@@ -128,9 +151,11 @@ public final class TrackPlayback {
     guard let nodeTime = voice.player.lastRenderTime,
           nodeTime.isSampleTimeValid || nodeTime.isHostTimeValid,
           let playerTime = voice.player.playerTime(forNodeTime: nodeTime) else {
-      return startFrame
+      return max(startFrame, lastKnownFrame)
     }
-    return startFrame + playerTime.sampleTime
+    let frame = startFrame + playerTime.sampleTime
+    lastKnownFrame = frame
+    return frame
   }
 
   public func start(atFrame frame: Int64 = 0) throws {

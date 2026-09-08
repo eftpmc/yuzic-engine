@@ -461,6 +461,12 @@ public final class PlaybackEngine {
       }
       publishNowPlaying()
     } catch {
+      // The old playback was stopped at the top of this function, so leaving it
+      // in place would leave the engine holding something that can never sound
+      // again — and `play()` would keep resuming it. Dropping it means the next
+      // play starts the track properly instead.
+      activePlayback = nil
+      state = .paused
       emit(.failed("audio graph could not be rebuilt after a route change: \(error)"))
     }
   }
@@ -474,6 +480,29 @@ public final class PlaybackEngine {
   }
 
   public func play() throws {
+    /*
+     A finished playback cannot be resumed, only restarted.
+
+     `resume()` calls `play()` on the node and then `fill()`, and `fill()`
+     returns immediately once `stopped` is set — so resuming a playback that
+     has been stopped is silence, with nothing thrown and no way back. Press
+     play again and it resumes the same corpse.
+
+     Two ordinary things leave one behind. A stream that failed after its retry
+     budget stops the playback and pauses the engine, and a configuration
+     change — the AirPod that died mid-track — stops it before rebuilding the
+     graph, and leaves it in place if that rebuild throws. Both reach a
+     listener the same way: the track is on screen, the button says play, and
+     pressing it does nothing at all.
+
+     Restarting from `currentFrame` puts the needle back where it was rather
+     than at the top of the track.
+     */
+    if let playback = activePlayback, playback.isFinished {
+      try beginTrack(at: queue.activeIndex, fromFrame: playback.currentFrame)
+      return
+    }
+
     if activePlayback == nil {
       try beginTrack(at: queue.activeIndex, fromFrame: 0)
     } else {
@@ -904,6 +933,11 @@ public final class PlaybackEngine {
   /// Raise the stall and recovery signals the reader raises, so a test can
   /// check what the engine does with them without a network that misbehaves
   /// on cue.
+  /// Leave a stopped playback in place, which is what a failed stream and a
+  /// failed graph rebuild both do, without needing either to happen.
+  func stopActivePlaybackForTesting() { activePlayback?.stop() }
+  var activePlaybackIsFinishedForTesting: Bool { activePlayback?.isFinished ?? true }
+
   func stallActiveTrackForTesting() { activePlayback?.onReadStalled?() }
   func resumeActiveTrackForTesting() { activePlayback?.onReadResumed?() }
 
