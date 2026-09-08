@@ -599,6 +599,39 @@ public final class PlaybackEngine {
    */
   private func wire(_ playback: TrackPlayback) {
     playback.onEndOfTrack = { [weak self, weak playback] in self?.handleTrackFinished(playback) }
+
+    /*
+     A stall is not a pause and not a failure — the connection has gone quiet
+     and the reader is retrying — and until now nobody was told.
+
+     `TrackPlayback` has raised `onReadStalled` on the first failed read since
+     the retry ladder was written, and nothing ever assigned it. So a listener
+     whose connection dropped got up to thirty-three seconds of silence behind
+     a play button that still said playing, and then either the music resumed
+     or the track died. Both outcomes arrived with no explanation, and the
+     buffering state the app already draws was sitting right there.
+
+     That is the shape `docs/architecture.md` §12 calls a function with no
+     callers: correct code, written, shipped, never invoked.
+
+     Saying it out loud is also what makes the retry budget defensible. Thirty
+     seconds of *unexplained* silence is a bug; thirty seconds of visible
+     buffering while a patchy connection is retried is a player doing its job.
+     */
+    playback.onReadStalled = { [weak self, weak playback] in
+      DispatchQueue.main.async {
+        guard let self, self.activePlayback === playback, self.state == .playing else { return }
+        self.state = .buffering
+        self.publishNowPlaying()
+      }
+    }
+    playback.onReadResumed = { [weak self, weak playback] in
+      DispatchQueue.main.async {
+        guard let self, self.activePlayback === playback, self.state == .buffering else { return }
+        self.state = .playing
+        self.publishNowPlaying()
+      }
+    }
     // A track that could not be read has *not* finished, and must not advance
     // the queue. `AudioFileReader.read` returns nil at the end and throws on
     // failure; treating both as the end is what made a dropped connection look
@@ -867,6 +900,12 @@ public final class PlaybackEngine {
   /// crossfade has to fetch for itself.
   func discardPreloadForTesting() { preparedNext = nil }
   func finishActiveTrackForTesting() { handleTrackFinished(activePlayback) }
+
+  /// Raise the stall and recovery signals the reader raises, so a test can
+  /// check what the engine does with them without a network that misbehaves
+  /// on cue.
+  func stallActiveTrackForTesting() { activePlayback?.onReadStalled?() }
+  func resumeActiveTrackForTesting() { activePlayback?.onReadResumed?() }
 
   // MARK: - The crossfade
 

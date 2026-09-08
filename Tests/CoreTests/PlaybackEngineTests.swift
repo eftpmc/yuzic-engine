@@ -594,6 +594,51 @@ final class PlaybackEngineTests: XCTestCase {
     XCTAssertEqual(seen, [.buffering, .playing], "the host should see the wait, then the start")
   }
 
+  /**
+   A stall says so, and recovery says so too.
+
+   `TrackPlayback` has raised `onReadStalled` on the first failed read since
+   the retry ladder was written, and for just as long nothing assigned it — so
+   a listener whose connection dropped watched a play button sit there through
+   up to thirty-three seconds of silence. The engine already had a state for
+   exactly this and the app already draws it.
+
+   This is the §12 shape: correct code, written, shipped, never invoked. A test
+   that only checked "does playback recover" would pass against the unwired
+   version, because recovery was never the broken part.
+   */
+  func testAStallIsAnnouncedAndClearedOnRecovery() throws {
+    let (engine, _, _) = try makeEngine()
+
+    engine.setQueue([song("a")], startIndex: 0)
+    try engine.play()
+
+    let playing = expectation(description: "reaches playing before the stall")
+    let deadline = Date().addingTimeInterval(5)
+    DispatchQueue.global().async {
+      while Date() < deadline && engine.state != .playing { usleep(10_000) }
+      playing.fulfill()
+    }
+    wait(for: [playing], timeout: 6)
+
+    var seen: [PlaybackEngine.PlaybackState] = []
+    engine.onEvent = { if case .stateChanged(let state) = $0 { seen.append(state) } }
+
+    // The engine answers these on main, as it does every other state change,
+    // so the run loop has to turn before the answer exists.
+    func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.15)) }
+
+    engine.stallActiveTrackForTesting()
+    settle()
+    XCTAssertEqual(engine.state, .buffering, "a stalled read left the player claiming to play")
+
+    engine.resumeActiveTrackForTesting()
+    settle()
+    XCTAssertEqual(engine.state, .playing, "reads resumed and the player stayed in buffering")
+
+    XCTAssertEqual(seen, [.buffering, .playing], "the host was not told either way")
+  }
+
   func testSkippingMovesTheQueueAndOpensTheNewTrack() throws {
     let (engine, factory, _) = try makeEngine()
     engine.setQueue([song("a"), song("b"), song("c")], startIndex: 0)
