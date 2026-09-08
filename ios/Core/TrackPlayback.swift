@@ -25,13 +25,25 @@ public final class TrackPlayback {
   /**
    How many times a failing read is retried before the track is given up on.
 
-   Twenty, with the delay below, is a little over half a minute of trying. The
-   first version allowed five over 3.75 seconds, which is not a stall on a
-   patchy cellular link — it is a blink, and giving up inside it turned a
-   momentary drop into a paused player a minute into a song. A listener will
-   forgive a gap far longer than they will forgive having to press play again.
+   A cap on requests, not on time — see `readRetryBudgetSec` for the wait a
+   listener actually experiences. The first version allowed five over 3.75
+   seconds, which is not a stall on a patchy cellular link but a blink, and
+   giving up inside it turned a momentary drop into a paused player a minute
+   into a song. A listener will forgive a gap far longer than they will forgive
+   having to press play again.
    */
   public static let readRetries = 20
+
+  /**
+   How long the ladder may keep trying, in wall clock.
+
+   The attempt count alone was not a budget. Every attempt calls through to a
+   range request that can block for its own timeout, so "twenty attempts" was
+   twenty *plus* however long each read sat there — minutes of silence, not the
+   half-minute the comment above claims. The count still caps the number of
+   requests; this caps the wait a listener actually experiences.
+   */
+  public static let readRetryBudgetSec: TimeInterval = 40
   /// Base delay, multiplied by the attempt and capped, so the ladder backs off
   /// without the last rungs becoming minutes apart.
   public static let readRetryDelaySec: TimeInterval = 0.25
@@ -72,6 +84,8 @@ public final class TrackPlayback {
   private var scheduledAny = false
   /// Consecutive failed reads, reset by any successful one.
   private var consecutiveFailures = 0
+  /// When the current run of failures began, for the wall-clock budget.
+  private var stalledSince: Date?
 
   /**
    Fires when reads have failed enough times to give up on the track.
@@ -165,6 +179,8 @@ public final class TrackPlayback {
     scheduledAhead = 0
     scheduledAny = false
     startFrameValue = frame
+    consecutiveFailures = 0
+    stalledSince = nil
     lock.unlock()
 
     try reader.seek(toFrame: frame)
@@ -238,6 +254,7 @@ public final class TrackPlayback {
           self.lock.lock()
           let wasStalled = self.consecutiveFailures > 0
           self.consecutiveFailures = 0
+          self.stalledSince = nil
           self.lock.unlock()
           if wasStalled { self.onReadResumed?() }
         } catch {
@@ -251,13 +268,15 @@ public final class TrackPlayback {
           self.lock.lock()
           self.consecutiveFailures += 1
           let attempt = self.consecutiveFailures
+          if self.stalledSince == nil { self.stalledSince = Date() }
+          let stalledFor = Date().timeIntervalSince(self.stalledSince ?? Date())
           let givenUp = self.stopped
           self.lock.unlock()
           if givenUp { return }
 
           if attempt == 1 { self.onReadStalled?() }
 
-          if attempt <= self.retries {
+          if attempt <= self.retries && stalledFor < Self.readRetryBudgetSec {
             // Re-dispatched rather than slept. Sleeping holds the decode
             // queue, and `stopAndWait` does `queue.sync {}` from the main
             // thread — so a backoff would block the interface for its whole

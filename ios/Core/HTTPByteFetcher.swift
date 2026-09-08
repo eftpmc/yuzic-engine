@@ -41,11 +41,28 @@ public final class HTTPByteFetcher: ByteFetcher, @unchecked Sendable {
   private var inFlight: URLSessionDataTask?
   private var cancelled = false
 
+  /**
+   How long one range request may take before it is a stall.
+
+   Was 30 seconds, which is a "has the server died" timeout and not a "is this
+   read healthy" one — and it was doing the second job. A window is 256KB; on
+   any connection worth playing over it lands in a second or two. Meanwhile
+   `perform` blocks the decode thread on a semaphore for the whole interval,
+   so a stalled read produced about two seconds of buffered audio and then
+   thirty seconds of silence before anything above it even learned there was a
+   problem. Reported as a track cutting out around the half-minute mark.
+
+   Eight seconds is long enough to ride out a cell handover and short enough
+   that the retry ladder above can actually do its job while the listener is
+   still waiting rather than after they have given up.
+   */
+  public static let defaultTimeout: TimeInterval = 8
+
   public init(
     url: URL,
     headers: [String: String] = [:],
     session: URLSession = .shared,
-    timeout: TimeInterval = 30
+    timeout: TimeInterval = HTTPByteFetcher.defaultTimeout
   ) {
     self.url = url
     self.headers = headers
