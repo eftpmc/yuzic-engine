@@ -531,8 +531,32 @@ reads 0 as end of stream. Four places, one lesson: **a callback that cannot
 throw will lose the difference between "could not read" and "finished" unless
 something is written to carry it across** — and proving that on one decoder
 proves nothing about the next. Each reader now records the reason on the way
-down and raises it on the way back up, and the tests run one stall through both
-formats so the asymmetry cannot come back silently.
+down and raises it on the way back up.
+
+Testing the same stall across four containers then found two more divergences
+that had been sitting behind the same assumption:
+
+- **The retry ladder was retrying a reader that could not recover.**
+  `TrackPlayback` retries a failed read for thirty-three seconds, against the
+  *same* reader, and Core Audio's FLAC parser latches after a failed read —
+  stuck at 40,960 frames of 220,500, and never moving again once the source
+  came back. So a stall the connection recovered from still ended the track.
+  A seek back to position yielded exactly one more buffer and stopped; the
+  latch is in the `AudioFile` parser, not the `ExtAudioFile` cursor, so
+  recovery has to rebuild both. ALAC and AAC did not latch but lost audio —
+  half a second and two tenths — which is quieter and just as wrong.
+- **A cancelled read is not an ending on every parser.** WAV and FLAC pass
+  `kAudioFileEndOfFileError` up as zero frames. MP4 reports it as a hard
+  error, so a deliberate seek on an ALAC or AAC track surfaced as a decode
+  failure.
+
+The tests are a matrix now — WAV, FLAC, ALAC, AAC × four properties, failures
+naming the format — and it is verified by mutation rather than by going green:
+remove the failure carry and it produces eight failures, of which **zero are
+WAV**. That is the entire point restated. **MP3 is the standing gap**: Core
+Audio decodes it and will not encode it, so no fixture can be built in process,
+and MP3 is what every transcoded stream is. Anyone who finds a way to get a
+small MP3 fixture into the suite should add it to the matrix.
 
 The common thread is that all of these are invisible to "does it return, and is
 the return value right". What catches them is asking what the code *did* — which
