@@ -137,6 +137,29 @@ export interface AudioEngine {
   /** Drop one track's cached audio — used when a download is deleted. */
   evict(id: MediaId): Promise<void>;
 
+  // ── mutual TLS ───────────────────────────────────────────────────────────
+  //
+  // A server behind a reverse proxy that asks the client for a certificate.
+  // The engine presents it on both transports; without it the handshake ends
+  // and every request reads as "cannot connect", with nothing to say that a
+  // certificate was ever wanted.
+  //
+  // `pkcs12Base64` is the imported file, base64'd for the bridge; the password
+  // decrypts it and is not retained here. Pass null to stop presenting one.
+  // Takes effect for the next track opened — the one playing keeps the
+  // connection it already authenticated.
+  //
+  // Rejects on a blob that will not decrypt, which is deliberate: a wrong
+  // password is worth saying while the person is still on the import screen,
+  // not at the first request as "unreachable".
+  //
+  // **iOS only**, and absent on Android rather than inert — the same rule as
+  // `configureCache`. Android's half is a KeyManager over the same PKCS#12 for
+  // OkHttp and Media3; it is not written because it could not be compiled or
+  // run where this was, and shipping unrun private-key handling is not a
+  // trade worth making. Hosts should gate the setting on the platform.
+  setClientCertificate(pkcs12Base64: string | null, password: string | null): Promise<void>;
+
   // ── platform surfaces ────────────────────────────────────────────────────
 
   /**

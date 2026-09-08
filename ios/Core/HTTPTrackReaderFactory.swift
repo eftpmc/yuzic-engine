@@ -59,8 +59,58 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
    */
   private let cache: DiskCache?
 
-  public init(cache: DiskCache? = nil) {
+  /**
+   Presented to servers that ask the client to prove who it is.
+
+   Held here because this is the one place both transports are built, and both
+   need it: a library behind mutual TLS refuses the audio request exactly as it
+   refuses the API one. Nil is the ordinary case and costs nothing — the ranged
+   path keeps using the shared session it always used.
+   */
+  private var clientCertificate: ClientCertificate?
+
+  /// One session for every ranged fetch, so the client-certificate handshake —
+  /// the expensive kind — is done once and the connection reused, rather than
+  /// repeated for every track.
+  private var session: URLSession
+
+  /// Guards the two above. Readers are made on the engine's open queue while
+  /// a certificate is set from the main thread, so these are genuinely shared.
+  private let lock = NSLock()
+
+  public init(cache: DiskCache? = nil, clientCertificate: ClientCertificate? = nil) {
     self.cache = cache
+    self.clientCertificate = clientCertificate
+    self.session = clientCertificate.map { makeClientCertificateSession(certificate: $0) } ?? .shared
+  }
+
+  /**
+   Change the certificate presented from here on.
+
+   Settable rather than fixed at construction because a certificate is
+   imported, replaced and removed while the app is running, and rebuilding the
+   engine around it would stop the music to change a setting. It takes effect
+   for the next reader opened; the track playing keeps the connection it
+   already authenticated.
+
+   The old session is invalidated rather than dropped — a `URLSession` holds
+   its delegate strongly until it is, which would keep a removed certificate's
+   identity alive for as long as the process ran.
+   */
+  public func setClientCertificate(_ certificate: ClientCertificate?) {
+    lock.lock()
+    let previous = session
+    clientCertificate = certificate
+    session = certificate.map { makeClientCertificateSession(certificate: $0) } ?? .shared
+    lock.unlock()
+    if previous !== URLSession.shared { previous.finishTasksAndInvalidate() }
+  }
+
+  /// Read together, because a fetcher built with one and a producer built with
+  /// the other would authenticate as two different clients.
+  private var transport: (session: URLSession, certificate: ClientCertificate?) {
+    lock.lock(); defer { lock.unlock() }
+    return (session, clientCertificate)
   }
 
   public func makeReader(for track: Track) throws -> TrackReader {
@@ -163,7 +213,7 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
       return streamingSource(url: url, track: track, timeOffsetSeconds: timeOffsetSeconds)
     }
 
-    let fetcher = HTTPByteFetcher(url: url, headers: track.headers)
+    let fetcher = HTTPByteFetcher(url: url, headers: track.headers, session: transport.session)
     do {
       _ = try fetcher.contentLength()
     } catch HTTPByteFetcher.HTTPFetchError.noLength {
@@ -208,7 +258,8 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
       : Int64(64 * 1024 * 1024)
     let producer = HTTPStreamProducer(
       url: streamURL(base: url, timeOffsetSeconds: timeOffsetSeconds),
-      headers: track.headers
+      headers: track.headers,
+      clientCertificate: transport.certificate
     )
     return StreamingByteSource(producer: producer, estimatedBytes: estimate)
   }

@@ -44,6 +44,10 @@ public final class YuzicEngineModule: Module {
   private var engine: PlaybackEngine?
   private var sleepTimer: SleepTimer?
   private var cache: DiskCache?
+  /// Held so a certificate set before `setup` still reaches the factory, and
+  /// so one set after it can be handed to a factory that already exists.
+  private var factory: HTTPTrackReaderFactory?
+  private var clientCertificate: ClientCertificate?
 
   /**
    The engine, or a named failure.
@@ -89,7 +93,14 @@ public final class YuzicEngineModule: Module {
         // the engine worked without one until now, and falls back to that.
         let cache = try? DiskCache(directory: Self.defaultCacheDirectory())
         self.cache = cache
-        let engine = PlaybackEngine(graph: graph, factory: HTTPTrackReaderFactory(cache: cache))
+        // Carried into the factory rather than re-sent by the app: the
+        // certificate can be set before `setup` as easily as after, and a
+        // caller should not have to know which order it happened in.
+        let factory = HTTPTrackReaderFactory(
+          cache: cache, clientCertificate: self.clientCertificate
+        )
+        self.factory = factory
+        let engine = PlaybackEngine(graph: graph, factory: factory)
         engine.onEvent = { [weak self] event in self?.forward(event) }
         // Honoured rather than ignored — Android has always applied it, and a
         // host asking for 1Hz was getting 4Hz of bridge traffic here. Floored
@@ -226,6 +237,34 @@ public final class YuzicEngineModule: Module {
     // calling one failed with "function not found" — which the comment there
     // described as throwing rather than quietly doing nothing, and preferred
     // to a method that lies. They do something now.
+
+    /**
+     Present a client certificate to servers that ask for one.
+
+     `pkcs12Base64` is the file the person imported, base64'd because that is
+     what crosses the bridge; nil clears it. The password decrypts the blob and
+     is not stored here — the app holds both in the system keychain and hands
+     them over on each setup.
+
+     Throws on a blob that will not decrypt, rather than accepting it and
+     failing later at the first request. A certificate that cannot be read is
+     something the person can fix while they are still looking at the screen
+     they imported it on, and reporting it there is the difference between a
+     typo in a password and "the server is unreachable".
+     */
+    AsyncFunction("setClientCertificate") { (pkcs12Base64: String?, password: String?) in
+      guard let pkcs12Base64, !pkcs12Base64.isEmpty else {
+        self.clientCertificate = nil
+        self.factory?.setClientCertificate(nil)
+        return
+      }
+      guard let blob = Data(base64Encoded: pkcs12Base64) else {
+        throw ClientCertificateError.notBase64
+      }
+      let certificate = try ClientCertificate(pkcs12: blob, password: password ?? "")
+      self.clientCertificate = certificate
+      self.factory?.setClientCertificate(certificate)
+    }
 
     AsyncFunction("configureCache") { (options: CacheOptionsRecord) in
       self.cache?.configure(maxBytes: Int64(options.maxBytes))
@@ -542,5 +581,17 @@ extension CrossfadeRecord {
       mode: CrossfadeMode(rawValue: mode) ?? .gaplessAware,
       skipIsImmediate: skipIsImmediate
     )
+  }
+}
+
+/// Raised before the certificate layer is reached, for input that could not
+/// have been a PKCS#12 in the first place.
+enum ClientCertificateError: Error, LocalizedError {
+  case notBase64
+
+  var errorDescription: String? {
+    switch self {
+    case .notBase64: return "The certificate could not be decoded."
+    }
   }
 }

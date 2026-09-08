@@ -188,10 +188,22 @@ public final class HTTPStreamProducer: NSObject, StreamProducer, URLSessionDataD
   private var onData: ((Data) -> Void)?
   private var onFinish: ((Error?) -> Void)?
 
-  public init(url: URL, headers: [String: String] = [:], timeout: TimeInterval = 30) {
+  /// Presented when the server asks for one; nil for the ordinary case where
+  /// it does not. Held rather than borrowed from a shared session because this
+  /// class is already its own `URLSessionDataDelegate` — it needs the data
+  /// callbacks — and a session may only have one delegate.
+  private let clientCertificate: ClientCertificate?
+
+  public init(
+    url: URL,
+    headers: [String: String] = [:],
+    timeout: TimeInterval = 30,
+    clientCertificate: ClientCertificate? = nil
+  ) {
     var request = URLRequest(url: url, timeoutInterval: timeout)
     for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
     self.request = request
+    self.clientCertificate = clientCertificate
     super.init()
   }
 
@@ -208,6 +220,17 @@ public final class HTTPStreamProducer: NSObject, StreamProducer, URLSessionDataD
     task?.cancel()
     session?.invalidateAndCancel()
     session = nil
+  }
+
+  public func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    didReceive challenge: URLAuthenticationChallenge,
+    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+  ) {
+    answerAuthenticationChallenge(
+      challenge, with: clientCertificate, completionHandler: completionHandler
+    )
   }
 
   public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
