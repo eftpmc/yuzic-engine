@@ -402,6 +402,11 @@ private class EnginePlayer(private val graph: AudioGraph) :
   override fun isPlaying(): Boolean = active.isPlaying
 
   override fun play() {
+    // The lock screen and Android Auto reach playback through here, so this
+    // needs the same re-establish as the module's `play`: `play()` alone does
+    // nothing to a player left in `STATE_IDLE` by a failed stream or a `stop`,
+    // and the car's play button would simply do nothing.
+    if (active.playbackState == Player.STATE_IDLE) active.prepare()
     active.play()
   }
 

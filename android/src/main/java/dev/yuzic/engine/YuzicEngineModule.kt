@@ -199,7 +199,24 @@ class YuzicEngineModule : Module() {
     // on the thread that built it and an `AsyncFunction` body is not that
     // thread.
 
-    AsyncFunction("play") { onPlayer { it.play() } }
+    /*
+     `play()` on ExoPlayer only sets `playWhenReady`. A player in `STATE_IDLE`
+     — where a fatal `PlaybackException` leaves it, and where `stop()` puts it
+     — produces nothing until `prepare()` is called, and `prepare` is reached
+     from exactly two places here, both of which load a *different* track. So
+     after a stream failed, or after a host `stop()`, pressing play did nothing
+     at all and there was no error to say why.
+
+     The same defect iOS had, in this platform's vocabulary: there, `play()`
+     resumed a `TrackPlayback` that had been stopped and could never sound
+     again. Both now re-establish instead of resuming a corpse.
+    */
+    AsyncFunction("play") {
+      onPlayer {
+        if (it.playbackState == Player.STATE_IDLE) it.prepare()
+        it.play()
+      }
+    }
     AsyncFunction("pause") { onPlayer { it.pause() } }
     AsyncFunction("stop") { onPlayer { it.stop() } }
 
