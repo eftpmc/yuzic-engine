@@ -11,6 +11,25 @@ behaviour does not.
 
 ## [Unreleased]
 
+## [1.0.1]
+
+Test and tooling only; no change to the engine's behaviour or its API.
+
+### Fixed
+
+- `StreamReconnectTests.testReconnectionGivesUpAfterItsBudget` failed about
+  three runs in four. It injected a fixed number of read failures and asserted
+  the engine had seen every one, which it had not: `onReadFailed` hops to the
+  main queue and only then checks `activePlayback === playback`, so a failure
+  arriving while a reconnection is swapping the playback out finds a different
+  object and returns. That drop is correct — a failure belongs to the playback
+  that raised it — so the test was wrong rather than the engine, and it now
+  injects until the budget is actually spent.
+- `Tools/mutate.py` had been unusable since the repository moved: `ROOT` was an
+  absolute path to a checkout that no longer exists, so it died on its first
+  file read. Derived from `__file__` now. With it running again, all nine
+  mutations are caught and none survive.
+
 ## [1.0.0]
 
 First published release. The engine has been in production use in
@@ -76,5 +95,6 @@ point; 1.0.0 marks the API being committed to rather than the code being new.
   live one mid-track. `Tools/parity.py` declares it; every other method agrees
   across the two platforms by signature and event vocabulary.
 
-[Unreleased]: https://github.com/yuzicapp/yuzic-engine/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/yuzicapp/yuzic-engine/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/yuzicapp/yuzic-engine/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/yuzicapp/yuzic-engine/releases/tag/v1.0.0
