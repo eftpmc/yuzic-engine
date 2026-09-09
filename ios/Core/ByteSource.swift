@@ -45,6 +45,22 @@ public protocol ByteSource: AnyObject {
    can forward it without knowing which sources exist.
    */
   var isSequential: Bool { get }
+
+  /**
+   Whether the length this source reports is a fact rather than a guess.
+
+   Only meaningful for a sequential source, and only false while one is still
+   streaming: a transcoded response arrives with no `Content-Length`, so
+   `totalBytes()` answers `duration × bitrate` until the producer says it has
+   finished, at which point the real byte count is known.
+
+   It exists because "an empty read at the reported length" means opposite
+   things either side of that line. Against a known length it is the end of
+   the file. Against an estimate it means only that the bytes have not arrived
+   — and reading it as an ending is how a track ends itself early, silently,
+   which the engine then follows by advancing the queue.
+   */
+  var isFinished: Bool { get }
 }
 
 public extension ByteSource {
@@ -52,6 +68,10 @@ public extension ByteSource {
   /// normal case and the sequential one is the exception that has to declare
   /// itself.
   var isSequential: Bool { false }
+
+  /// A source whose length came from the server is never mid-guess. Only the
+  /// sequential transport has to answer this for real.
+  var isFinished: Bool { true }
 }
 
 extension CachedByteSource: ByteSource {}
