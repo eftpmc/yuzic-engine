@@ -8,7 +8,12 @@ one.
 """
 import io, subprocess, sys, os
 
-ROOT = '/Users/zack/Documents/GitHub/yuzic-engine'
+# The repository this file sits in, found rather than written down. It was an
+# absolute path to a checkout that has since moved (`GitHub/yuzic-engine`, now
+# `GitHub/yuzicapp/yuzic-engine`), so the tool failed on its first file read
+# for anyone but its author — and silently claimed the suite was fine before
+# that. Deriving it from __file__ means a clone anywhere works.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # (label, relative path, exact text to find, replacement)
 MUTATIONS = [

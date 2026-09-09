@@ -185,12 +185,29 @@ final class StreamReconnectTests: XCTestCase {
 
     var failures: [String] = []
     engine.onEvent = { if case .failed(let message) = $0 { failures.append(message) } }
+    var lastOpens = factory.offsetsAsked.count
 
-    for attempt in 1...(PlaybackEngine.maxStreamReconnects + 1) {
+    // Injected until the budget is spent rather than a fixed number of times,
+    // because an injected failure can legitimately be dropped: `onReadFailed`
+    // hops to the main queue and then checks `activePlayback === playback`, so
+    // one arriving while a reconnection is swapping the playback out finds a
+    // different object and returns. That is correct — a failure belongs to the
+    // playback that raised it — but it means "four injections" is not the same
+    // thing as "four failures seen", and asserting on the former was a 3-in-4
+    // flake here. Each miss cost a full `settle` timeout, which is why a
+    // failing run took six seconds and a passing one a tenth.
+    //
+    // Looping cannot run away: the budget is only refilled by `onReadResumed`,
+    // which fires when reads flow again, and the source in this fixture is
+    // never asked to fail a read — so once the budget is spent the next
+    // failure the engine *does* see is reported. The bound is a safety net for
+    // a genuine hang, not a tuning knob.
+    for _ in 1...20 {
+      if !failures.isEmpty { break }
       engine.failActiveTrackForTesting(ByteSourceError.fetchFailed("stream went away"))
-      settle { factory.offsetsAsked.count >= attempt || !failures.isEmpty }
+      settle(timeout: 1) { !failures.isEmpty || factory.offsetsAsked.count > lastOpens }
+      lastOpens = factory.offsetsAsked.count
     }
-    settle { !failures.isEmpty }
 
     XCTAssertEqual(
       factory.offsetsAsked.count, PlaybackEngine.maxStreamReconnects + 1,
