@@ -373,6 +373,16 @@ What it adds, now built as `StreamingByteSource`:
   and letting the download run through a seek is better anyway: the buffer
   keeps filling while the reader is repositioned.
 
+  **Neither fault has an Android counterpart, structurally.** Both live in the
+  hand-written byte source that exists only because Core Audio has no caching
+  data source (§2). Media3 owns the transport on Android: `seekTo` goes
+  straight to ExoPlayer, `CacheDataSource` does its own ranged refetching and
+  reconnection, and there is no `cancel`/`resume` pair and no producer to stop.
+  Nor is there a length estimate to mistake for an ending — Media3 reports
+  `TIME_UNSET` for a duration it does not know and the bridge answers `0`
+  rather than guessing. This is the one place where Android's implementation
+  being a fraction of iOS's is an advantage.
+
 - **A forward seek past the write head is a reconnection, not a read.**
   `streamURL(base:timeOffsetSeconds:)` builds the new request; the layer above
   replaces the source and reopens the reader, because the new stream's byte

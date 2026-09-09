@@ -46,6 +46,27 @@ point; 1.0.0 marks the API being committed to rather than the code being new.
 - **Events** — state changes, track changes carrying the time actually
   listened, progress, queue changes, and errors.
 
+### Fixed
+
+- **A seek no longer ends the stream it is seeking within.**
+  `StreamingByteSource.cancel()` stopped its producer, which for the HTTP
+  producer cancels the task and invalidates the session — irreversible — while
+  `resume()` only cleared a flag and nothing restarted it. Since every seek
+  cancels and resumes the source being decoded from, the first seek ended a
+  transcoded stream for good and every read afterwards timed out: silence, and
+  then a track that ended itself. The contract on `ByteSource` is exactly
+  "unblocks any waiting read", so stopping the producer was always more than
+  `cancel()` was asked to do; teardown belongs to `deinit`. Streamed audio
+  only — a downloaded file never takes this path, and Android has no
+  equivalent because Media3 owns that transport.
+- **An estimated length is no longer mistaken for the end of a track.** For a
+  sequential source `totalBytes()` is `duration × bitrate` until the stream
+  ends, and `AudioFileReader` turned an empty read at that figure into a clean
+  end-of-file, which the engine follows by advancing the queue. A new
+  `isFinished` on `ByteSource` says whether a reported length is a fact or a
+  guess, and only a fact may mean end-of-file. Ranged sources report `true` by
+  default, so that transport is unchanged.
+
 ### Known gaps
 
 - `configureCache` is **absent on Android**, deliberately rather than stubbed,
