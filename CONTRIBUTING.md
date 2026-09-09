@@ -68,7 +68,22 @@ them failed a suite.
 npm run typecheck    # both tsconfigs — the second is what `prepare` uses
 npm test
 swift test
+python3 Tools/parity.py
 ```
 
-Android has no test target. Changes to `android/` are verified by building and
-running them on a device or emulator, and a commit should say which.
+`.github/workflows/checks.yml` runs those four on every push and pull request
+to `main`.
+
+**Android is built by its host, not here.** This module has no Gradle wrapper
+and no `settings.gradle`, because an Expo module is compiled by the app that
+consumes it — `expoAutolinking.useExpoModules()` in the app's
+`android/settings.gradle` is what pulls this directory into a build at all. So
+`android/src/test/` runs as `:yuzic-engine:testDebugUnitTest` through the
+*app's* `./gradlew`, against whatever commit the app has pinned. There is a
+Kotlin unit-test target now (the mutual-TLS import, its rejection cases and its
+clearing); it is reached that way rather than standalone.
+
+That is also why CI has no Android job yet. Running one means checking out the
+app, repointing its `yuzic-engine` dependency at the commit under test, and
+building through it — worth doing, and not free, since it drags the whole app's
+dependency tree and the NDK into this repository's CI.

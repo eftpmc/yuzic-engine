@@ -7,6 +7,10 @@
     "type": "git",
     "url": "git+https://github.com/yuzicapp/yuzic-engine.git"
   },
+  "homepage": "https://github.com/yuzicapp/yuzic-engine#readme",
+  "bugs": {
+    "url": "https://github.com/yuzicapp/yuzic-engine/issues"
+  },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "source": "src/index.ts",
@@ -19,6 +23,7 @@
     "src",
     "LICENSE",
     "NOTICE",
+    "CHANGELOG.md",
     "README.md"
   ],
   "scripts": {

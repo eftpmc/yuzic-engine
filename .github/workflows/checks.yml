@@ -10,13 +10,12 @@ concurrency:
   group: checks-${{ github.ref }}
   cancel-in-progress: true
 
-# Three jobs, and deliberately not a fourth for Android. This module has no
-# Gradle wrapper and no settings.gradle because an Expo module is built by its
-# host app, not on its own — the Android half is currently compiled by building
-# the yuzic app against a pinned engine commit. Adding a throwaway host project
-# here is the way to close that, and it is a real piece of work rather than a
-# missing line; see CONTRIBUTING.md. A job that cannot run is worse than an
-# absent one, so it is absent.
+# Four jobs. The Android one is shaped oddly on purpose: this module has no
+# Gradle wrapper and no settings.gradle, because an Expo module is compiled by
+# the app that consumes it — `expoAutolinking.useExpoModules()` in the app's
+# android/settings.gradle is what pulls this directory into a build at all. So
+# the Android half is verified by checking out the app, repointing its
+# yuzic-engine dependency at the commit under test, and building through it.
 
 jobs:
   # The TypeScript surface: the bridge, its types, and the pure helpers.
@@ -56,3 +55,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: swift test
+
+  # The Android library and its JVM unit tests, built through the host app —
+  # see the note above for why it cannot be built standalone. This proves
+  # compilation and unit behaviour, not device behaviour: no emulator runs here.
+  android:
+    name: Build & Test (Android)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the engine
+        uses: actions/checkout@v4
+        with:
+          path: engine
+
+      - name: Checkout the host app
+        uses: actions/checkout@v4
+        with:
+          repository: yuzicapp/yuzic
+          ref: dev
+          path: app
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Build against THIS commit rather than whatever the app has pinned,
+      # which is the entire point — otherwise the job silently tests the
+      # engine the app already had.
+      - name: Point the app at this commit
+        working-directory: app
+        run: |
+          npm pkg set dependencies.yuzic-engine=file:../engine
+          npm install --no-audit --no-fund
+
+      - name: Confirm the engine under test is the one that got installed
+        working-directory: app
+        run: test -f node_modules/yuzic-engine/android/src/main/java/dev/yuzic/engine/ClientCertificateTransport.kt
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests
+        working-directory: app/android
+        run: ./gradlew :yuzic-engine:testDebugUnitTest
+
+      - name: Assemble
+        working-directory: app/android
+        run: ./gradlew :yuzic-engine:assembleDebug
