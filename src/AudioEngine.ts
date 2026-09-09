@@ -146,18 +146,9 @@ export interface AudioEngine {
   //
   // `pkcs12Base64` is the imported file, base64'd for the bridge; the password
   // decrypts it and is not retained here. Pass null to stop presenting one.
-  // Takes effect for the next track opened — the one playing keeps the
-  // connection it already authenticated.
-  //
-  // Rejects on a blob that will not decrypt, which is deliberate: a wrong
-  // password is worth saying while the person is still on the import screen,
-  // not at the first request as "unreachable".
-  //
-  // **iOS only**, and absent on Android rather than inert — the same rule as
-  // `configureCache`. Android's half is a KeyManager over the same PKCS#12 for
-  // OkHttp and Media3; it is not written because it could not be compiled or
-  // run where this was, and shipping unrun private-key handling is not a
-  // trade worth making. Hosts should gate the setting on the platform.
+  // Takes effect for the next network request. A request already in flight may
+  // finish on the identity it started with. Rejects immediately when the blob
+  // is malformed or the password cannot decrypt it.
   setClientCertificate(pkcs12Base64: string | null, password: string | null): Promise<void>;
 
   /**
@@ -179,8 +170,6 @@ export interface AudioEngine {
    * A non-2xx is returned, not thrown: an HTTP error is an answer, and the
    * callers already read `status`. It rejects only when no answer arrived at
    * all — a failed handshake, a refused connection, a timeout.
-   *
-   * **iOS only**, like `setClientCertificate`.
    */
   clientCertificateRequest(options: ClientCertificateRequest): Promise<ClientCertificateResponse>;
 

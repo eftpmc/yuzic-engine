@@ -15,7 +15,6 @@ import androidx.media3.session.SessionResult
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import okhttp3.OkHttpClient
 
 /**
  * The service that owns the session, the notification and the browse tree.
@@ -52,6 +51,15 @@ class PlaybackService : MediaLibraryService() {
       private set
 
     val queue = PlaybackQueue()
+
+    /**
+     * Process-lifetime network identity shared by API calls and both voices.
+     *
+     * The service can outlive the Expo module, so keeping this beside the graph
+     * prevents a service restart from quietly rebuilding audio with a different
+     * client than the bridge. The module clears it explicitly on teardown.
+     */
+    val clientCertificateTransport = ClientCertificateTransport()
 
     /** The root the host handed over via `setBrowseTree`. Null until it does. */
     @Volatile
@@ -132,7 +140,10 @@ class PlaybackService : MediaLibraryService() {
     // `Engine.graph`, not `this.graph`: the graph lives on the companion so it
     // survives the service being restarted by the system with no module alive.
     // `this` here is the service instance, which does not have one.
-    val graph = Engine.graph ?: AudioGraph(this, OkHttpClient()).also { attachGraph(it) }
+    val graph = Engine.graph ?: AudioGraph(
+      this,
+      clientCertificateTransport.audioCallFactory,
+    ).also { attachGraph(it) }
 
     // AudioAttributes with handleAudioFocus is what makes the engine a good
     // citizen: ducking for navigation prompts, pausing for a call, and resuming

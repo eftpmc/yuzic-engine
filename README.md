@@ -56,7 +56,9 @@ always cuts, because a fade after a button press reads as lag.
 album/track/auto modes and clipping protection.
 
 **Sources.** Local files, and HTTP streaming with auth in query parameters or
-headers. Remote audio is fetched through a byte source with an on-device LRU
+headers. Mutual TLS can import a PKCS#12 identity in memory and presents the
+same identity for ordinary server API requests and Media3/Core Audio streaming.
+Remote audio is fetched through a byte source with an on-device LRU
 cache keyed by media id — not by URL, because Subsonic and Jellyfin hand out
 URLs carrying a token that rotates, and keying on those re-downloads the same
 audio every session.
@@ -100,6 +102,7 @@ wrong before by asserting a parity that had stopped being true hours earlier.
 | Equalizer, replay gain | yes | yes |
 | Lock screen, car | yes | yes |
 | Disk cache | yes | yes |
+| Mutual TLS for API and audio | yes | yes |
 | Cache management | yes | all but `configureCache` |
 
 Android has always cached — `SimpleCache` sits in the data source chain, keyed

@@ -48,4 +48,6 @@ dependencies {
   // SimpleCache / CacheDataSource. Android gets the whole of docs/architecture.md
   // §2 from this artifact, which iOS has no equivalent of at any price.
   implementation "androidx.media3:media3-datasource:${MEDIA3_VERSION}"
+
+  testImplementation 'junit:junit:4.13.2'
 }

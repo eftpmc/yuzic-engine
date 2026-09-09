@@ -39,22 +39,6 @@ KNOWN_GAPS = {
     # corrupts the index) or releasing the live one mid-track. Deliberately
     # absent rather than stubbed, so it rejects by name at the bridge.
     "configureCache": "android",
-    # Mutual TLS is iOS-only for now, and deliberately so rather than by
-    # oversight. Android's half is a KeyManager built from the same PKCS#12,
-    # handed to OkHttp for the API surface and to Media3's DataSource for
-    # audio — small code, but it is the private key handling for someone's
-    # server, and the machine this was written on has no Android toolchain to
-    # compile or run it on. Guessing at security code and shipping it unrun is
-    # not a trade worth making; the gap is honest and the app hides the setting
-    # on Android until it is real.
-    "setClientCertificate": "android",
-    # The API-request half of the same gap, and absent for the same reason.
-    # Android's version is an OkHttp client built from the same KeyManager, so
-    # it arrives with `setClientCertificate` or not at all — the two are one
-    # feature, and shipping either alone leaves mutual TLS half-reachable:
-    # a certificate on the audio transport cannot help when the login that
-    # precedes every track is the request the server refuses.
-    "clientCertificateRequest": "android",
 }
 
 # Events one platform declares and deliberately never sends. Same rule as

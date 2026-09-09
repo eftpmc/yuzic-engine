@@ -74,6 +74,10 @@ class YuzicEngineModule : Module() {
       controllerFuture?.let { MediaController.releaseFuture(it) }
       controllerFuture = null
       TrackHeaders.clear()
+      // The service and graph can outlive this JS module. Explicitly remove the
+      // process-held identity so teardown cannot leave it presented to a server
+      // selected by the next module instance.
+      PlaybackService.clientCertificateTransport.setClientCertificate(null, null)
     }
 
     // MARK: queue
@@ -324,6 +328,37 @@ class YuzicEngineModule : Module() {
         "usedBytes" to (stats?.usedBytes ?: 0L),
         "maxBytes" to (stats?.maxBytes ?: 0L),
         "entryCount" to (stats?.entryCount ?: 0),
+      )
+    }
+
+    // MARK: mutual TLS
+
+    /**
+     * Import now rather than at the first request. Wrong passwords and malformed
+     * PKCS#12 files therefore reject on the import screen, and the old working
+     * identity remains active if replacement fails. Null or empty clears both
+     * API and audio because both snapshot the same process-lifetime transport.
+     */
+    AsyncFunction("setClientCertificate") { pkcs12Base64: String?, password: String? ->
+      PlaybackService.clientCertificateTransport.setClientCertificate(pkcs12Base64, password)
+    }
+
+    /**
+     * JavaScript fetch cannot present a client identity. This narrow request
+     * path uses the same pooled OkHttp client that Media3 snapshots for audio.
+     */
+    AsyncFunction("clientCertificateRequest") { options: ClientCertificateRequestRecord ->
+      val result = PlaybackService.clientCertificateTransport.request(
+        url = options.url,
+        method = options.method,
+        headers = options.headers,
+        bodyBase64 = options.bodyBase64,
+        timeoutMs = options.timeoutMs,
+      )
+      mapOf(
+        "status" to result.status,
+        "headers" to result.headers,
+        "bodyBase64" to result.bodyBase64,
       )
     }
 
@@ -1132,6 +1167,16 @@ class EqBandRecord : Record {
   @Field var frequencyHz: Double = 0.0
   @Field var gainDb: Double = 0.0
   @Field var q: Double? = null
+}
+
+class ClientCertificateRequestRecord : Record {
+  @Field var url: String = ""
+  @Field var method: String = "GET"
+  @Field var headers: Map<String, String> = emptyMap()
+  /** Base64 because a request body may be arbitrary bytes. Null for a GET. */
+  @Field var bodyBase64: String? = null
+  /** Same default request ceiling as iOS and the TypeScript contract. */
+  @Field var timeoutMs: Int = 30_000
 }
 
 /**

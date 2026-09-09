@@ -635,12 +635,21 @@ left in `STATE_IDLE`, the same defect iOS had with a stopped `TrackPlayback`;
 end of the queue as it is on iOS; the first track of a queue announced itself
 on iOS and not on Android, and `setQueue` now sends `onTrackChange` for it;
 `skipToNext` under `repeat: one` replayed the track on Android and now advances
-as it does on iOS; and `PlaybackState = 'error'`, which neither platform ever
-emitted, is gone from `src/types.ts`.
+as it does on iOS; `PlaybackState = 'error'`, which neither platform ever
+emitted, is gone from `src/types.ts`; and Android now imports the same PKCS#12
+identity for both the bridge's ordinary API requests and Media3 audio fetches.
+The latter uses one synchronized, process-lifetime transport: API calls snapshot
+its reused OkHttp client directly, while each voice keeps a stable delegating
+`Call.Factory` that snapshots that client when Media3 creates a request. That
+indirection matters because `DefaultMediaSourceFactory` captures its data-source
+factory when a voice is built; merely replacing a graph field would leave both
+existing players presenting the old identity. Clearing swaps to a normal client
+for both paths and evicts the removed client's pooled connections without
+weakening the platform trust manager or hostname verification.
 
-The Android half of that list is unverified. This machine has no Android
-toolchain — see the platform split in the README — so those changes are read
-and reasoned but never compiled or run. Treat them as such.
+The Android implementation is compiled and its native unit tests run through a
+real Android SDK/NDK host. Behaviour that needs a handset remains called out
+below rather than being inferred from compilation.
 
 Still true, and each is a decision rather than an oversight to fix blindly:
 

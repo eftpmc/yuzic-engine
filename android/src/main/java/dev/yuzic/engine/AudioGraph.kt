@@ -18,7 +18,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import okhttp3.OkHttpClient
+import okhttp3.Call
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -51,7 +51,7 @@ import kotlin.math.sinh
  * [setEqualizer] — never to update one voice's curve without the other.
  */
 @UnstableApi
-class AudioGraph(private val context: Context, private val httpClient: OkHttpClient) {
+class AudioGraph(private val context: Context, private val httpCallFactory: Call.Factory) {
 
   /**
    * A player and the two processors spliced into its output. Fade gain is kept
@@ -158,7 +158,7 @@ class AudioGraph(private val context: Context, private val httpClient: OkHttpCli
     // DefaultDataSource wraps the upstream so `file://` for offline downloads
     // resolves through exactly the same chain as `https://`. One path, as §2
     // asks for.
-    val network = DefaultDataSource.Factory(context, OkHttpDataSource.Factory(httpClient))
+    val network = DefaultDataSource.Factory(context, OkHttpDataSource.Factory(httpCallFactory))
 
     // Headers are attached here, per request, rather than on the OkHttp client.
     // They are a property of the track (see `Track.headers`) because some
