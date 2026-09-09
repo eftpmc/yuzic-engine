@@ -98,6 +98,16 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # The engine's C++ needs the NDK, and letting Gradle fetch it is both
+      # slow and unreliable — a run here spent fourteen minutes before failing
+      # on `Archive is not a ZIP archive` from a half-downloaded NDK 27. The
+      # ubuntu runner ships NDKs already, so point Gradle at one instead of
+      # having it install its own.
+      - name: Use the runner's own NDK
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "ndk.dir=$ANDROID_NDK_LATEST_HOME" >> app/android/local.properties
+
       - name: Unit tests
         working-directory: app/android
         run: ./gradlew :yuzic-engine:testDebugUnitTest
