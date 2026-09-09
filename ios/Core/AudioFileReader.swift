@@ -412,8 +412,21 @@ public final class AudioFileReader: TrackReader {
         // Empty *at or past* the end is the end. Empty before it is a source
         // that could not serve the bytes, which is a different thing entirely
         // and must not be reported as the song finishing.
+        //
+        // "The end" has to mean a length the source actually knows. A
+        // sequential source answers `totalBytes()` with an *estimate* until
+        // its producer reports finishing — so believing that estimate here
+        // turns "we have not received these bytes yet" into "the track is
+        // over", and the engine advances the queue on it. `isFinished` is
+        // false until the producer's own onFinish fires, which is the only
+        // thing that genuinely knows the stream ended; a ranged source
+        // reports true, because its length came from Content-Length and was
+        // never a guess.
         let total = (try? reader.source.totalBytes()) ?? 0
-        if total > 0 && position >= total { return kAudioFileEndOfFileError }
+        let lengthIsKnown = reader.source.isFinished || !reader.source.isSequential
+        if total > 0 && position >= total && lengthIsKnown {
+          return kAudioFileEndOfFileError
+        }
         reader.sourceFailure = ByteSourceError.fetchFailed(
           "empty read at \(position) of \(total)"
         )

@@ -23,6 +23,17 @@ import Security
  */
 public final class ClientCertificate {
 
+  #if os(macOS)
+  /**
+   A keychain for `SecPKCS12Import` to write into, on macOS only.
+
+   Nil in every shipping configuration — iOS does not need one and does not
+   have this API. A test sets it once so `swift test` can exercise the import
+   at all; see the note in `init` for why the call fails outright without it.
+   */
+  public static var importKeychain: SecKeychain?
+  #endif
+
   public enum ImportError: Error, Equatable {
     /// The blob is not a PKCS#12 file, or the password does not decrypt it.
     /// One case rather than two on purpose: `SecPKCS12Import` reports
@@ -59,7 +70,25 @@ public final class ClientCertificate {
    */
   public init(pkcs12: Data, password: String) throws {
     var items: CFArray?
-    let options: [String: Any] = [kSecImportExportPassphrase as String: password]
+    var options: [String: Any] = [kSecImportExportPassphrase as String: password]
+    #if os(macOS)
+    // macOS-only, and only reachable from tests. `SecPKCS12Import` writes the
+    // decrypted key into a keychain, and on macOS it refuses to pick one for
+    // itself: with no `kSecImportExportKeychain` it returns
+    // errSecPkcs12VerifyFailure (-26276) for *any* PKCS#12, however it was
+    // produced. iOS has no such requirement and no such API, so shipping code
+    // never takes this branch.
+    //
+    // Diagnosed the slow way, and worth recording: five different encodings
+    // (LibreSSL default, OpenSSL 3 default, -legacy, sha1 MAC, 3DES) all fail
+    // identically without a keychain and all import cleanly with one, so the
+    // blob's format was never the variable. Before this, every test here
+    // failed on macOS and the iOS mutual-TLS feature shipped with its own
+    // suite red.
+    if let keychain = Self.importKeychain {
+      options[kSecImportExportKeychain as String] = keychain
+    }
+    #endif
     let status = SecPKCS12Import(pkcs12 as CFData, options as CFDictionary, &items)
     guard status == errSecSuccess else { throw ImportError.cannotDecrypt(status) }
 

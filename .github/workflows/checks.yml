@@ -1,0 +1,142 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+# Four jobs. The Android one is shaped oddly on purpose: this module has no
+# Gradle wrapper and no settings.gradle, because an Expo module is compiled by
+# the app that consumes it — `expoAutolinking.useExpoModules()` in the app's
+# android/settings.gradle is what pulls this directory into a build at all. So
+# the Android half is verified by checking out the app, repointing its
+# yuzic-engine dependency at the commit under test, and building through it.
+
+jobs:
+  # The TypeScript surface: the bridge, its types, and the pure helpers.
+  typescript:
+    name: Typecheck & Test (TS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test -- --ci
+
+  # The check that exists because a method implemented on one platform and not
+  # the other is this project's characteristic failure. It compares signatures
+  # and event vocabulary, not just names, and fails on any gap not declared in
+  # KNOWN_GAPS with a reason.
+  parity:
+    name: iOS/Android parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 Tools/parity.py
+
+  # `swift test` over ios/Core through Package.swift — the model, queue rules,
+  # graph, readers and the vendored Xiph decoders. Not the Expo module, which
+  # needs a React Native toolchain to build at all.
+  ios:
+    name: Test (iOS core)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+
+  # The Android library and its JVM unit tests, built through the host app —
+  # see the note above for why it cannot be built standalone. This proves
+  # compilation and unit behaviour, not device behaviour: no emulator runs here.
+  android:
+    name: Build & Test (Android)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the host app
+        uses: actions/checkout@v4
+        with:
+          repository: yuzicapp/yuzic
+          ref: dev
+          path: app
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Build against THIS commit rather than whatever the app has pinned,
+      # which is the entire point — otherwise the job silently tests the
+      # engine the app already had.
+      #
+      # A `file:` dependency does NOT work here and was tried: npm symlinks it
+      # and skips `prepare`, so `lib/` is never built and Expo autolinking does
+      # not see the module at all. It has to be a git reference so the package
+      # is installed the way a consumer installs it.
+      - name: Point the app at this commit
+        working-directory: app
+        run: |
+          npm pkg set dependencies.yuzic-engine=github:yuzicapp/yuzic-engine#${{ github.event.pull_request.head.sha || github.sha }}
+          npm install --no-audit --no-fund
+
+      - name: Confirm the engine under test is the one that got installed
+        working-directory: app
+        run: test -f node_modules/yuzic-engine/android/src/main/java/dev/yuzic/engine/ClientCertificateTransport.kt
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The engine's C++ needs an NDK, and letting Gradle install one is both
+      # slow and unreliable: one run spent fourteen minutes before failing on
+      # `Archive is not a ZIP archive` from a half-downloaded NDK 27.
+      #
+      # The version is not the app's to choose — it comes from React Native,
+      # in `react-native/gradle/libs.versions.toml`, and moves when React
+      # Native does. So it is read from there rather than pinned here, and
+      # rather than guessed at from the runner: `$ANDROID_NDK_LATEST_HOME` is
+      # NDK 29 on this image and Gradle rejects the mismatch outright
+      # ("[CXX1104] NDK from ndk.dir ... had version [29.0.14206865] which
+      # disagrees with android.ndkVersion [27.1.12297006]").
+      #
+      # Installing it with `sdkmanager` rather than leaving it to Gradle is
+      # the point: this retries and then verifies the directory exists, where
+      # Gradle's auto-installer does neither.
+      - name: Install the NDK React Native asks for
+        working-directory: app
+        run: |
+          version="$(grep -E '^ndkVersion' \
+            node_modules/react-native/gradle/libs.versions.toml \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          if [ -z "$version" ]; then
+            echo "could not read ndkVersion from react-native's libs.versions.toml" >&2
+            exit 1
+          fi
+          echo "installing NDK $version"
+          for attempt in 1 2 3; do
+            yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+              "ndk;$version" && break
+            echo "sdkmanager attempt $attempt failed; retrying" >&2
+            rm -rf "$ANDROID_SDK_ROOT/ndk/$version"
+            sleep 10
+          done
+          test -d "$ANDROID_SDK_ROOT/ndk/$version"
+
+      - name: Unit tests
+        working-directory: app/android
+        run: ./gradlew :yuzic-engine:testDebugUnitTest
+
+      - name: Assemble
+        working-directory: app/android
+        run: ./gradlew :yuzic-engine:assembleDebug

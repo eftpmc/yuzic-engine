@@ -14,6 +14,34 @@ final class ClientCertificateTests: XCTestCase {
 
   private static let password = "correct horse battery staple"
 
+  /**
+   A throwaway keychain for the import to land in.
+
+   `SecPKCS12Import` decrypts the private key into a keychain, and **on macOS
+   it will not choose one itself** — without `kSecImportExportKeychain` it
+   returns errSecPkcs12VerifyFailure (-26276) for every PKCS#12 regardless of
+   how the file was produced. iOS neither needs this nor has the API, so this
+   is scaffolding for `swift test` and nothing the app ever executes.
+
+   Worth stating because the symptom is so misleading: -26276 reads as "this
+   file is corrupt", and it sent an earlier reading of this failure off after
+   the blob's encoding. LibreSSL's default, OpenSSL 3's default, `-legacy`, a
+   sha1 MAC and 3DES all fail the same way with no keychain and all import
+   cleanly with one. The file was never the variable.
+   */
+  private static var keychain: SecKeychain? = {
+    let path = NSTemporaryDirectory() + "yuzic-engine-tests-\(UUID().uuidString).keychain"
+    var created: SecKeychain?
+    guard SecKeychainCreate(path, UInt32(password.utf8.count), password, false, nil, &created)
+      == errSecSuccess else { return nil }
+    return created
+  }()
+
+  override class func setUp() {
+    super.setUp()
+    ClientCertificate.importKeychain = keychain
+  }
+
   /// A PKCS#12 holding a self-signed identity, or nil where `openssl` is not
   /// available to make one.
   private func makePKCS12(commonName: String = "yuzic-test-client") throws -> Data? {

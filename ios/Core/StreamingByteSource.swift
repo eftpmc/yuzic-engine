@@ -104,12 +104,42 @@ public final class StreamingByteSource: ByteSource {
   /// The one source this is true of, and the reason the flag exists.
   public var isSequential: Bool { true }
 
+  /// False until the producer's own `onFinish` fires. Until then
+  /// `totalBytes()` is `duration × bitrate` and nothing may treat reaching it
+  /// as reaching the end of the audio.
+  public var isFinished: Bool {
+    lock.lock(); defer { lock.unlock() }
+    return finished
+  }
+
+  /**
+   Unblock any waiting read. **Does not stop the producer**, and must not.
+
+   The contract on `ByteSource` is precisely "unblocks any waiting read" — it
+   is what lets a seek get a decode thread off the condition variable so the
+   reader can be pointed somewhere else. For the ranged transport that is all
+   `cancel` can mean anyway: a cancelled range request is reissued at the new
+   offset and nothing is lost.
+
+   This class has exactly one producer, started once behind `startIfNeeded`'s
+   `started` guard, and `HTTPStreamProducer.stop()` cancels the task *and*
+   invalidates the session. So stopping it here ended the transcode for good
+   while `resume()` — which only clears a flag — implied the opposite. Every
+   seek runs `cancelPendingReads()`/`resumePendingReads()` over the same
+   source, so one seek killed the stream and left a source that could only
+   time out: twelve seconds of silence per read, then a failure. Downloads
+   were unaffected, which is what made it look like a network fault.
+
+   Letting the download continue through a seek is also simply better: the
+   buffer keeps filling while the reader is repositioned, so a backward seek
+   lands in bytes that are already there. Teardown is `deinit`'s job, and it
+   already does it.
+   */
   public func cancel() {
     lock.lock()
     cancelled = true
     lock.broadcast()
     lock.unlock()
-    producer.stop()
   }
 
   public func resume() {

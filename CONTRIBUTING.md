@@ -57,6 +57,33 @@ drifted once in a way a name diff could not see. Run it after touching either
 module. It is mutation-tested itself — dropping a parameter, changing a type,
 renaming a method and closing a declared gap are each caught.
 
+**One test is known to be flaky: `StreamReconnectTests.testReconnectionGivesUpAfterItsBudget`.**
+It fails roughly three runs in four on an unloaded Mac, and it did so before
+the seek work that prompted this note — verified by running it at `1af5d4b`,
+which predates those changes. What it asserts is real and worth keeping; how it
+drives the engine is not sound.
+
+Measured, rather than guessed at: the loop injects four read failures and the
+engine answers only three. Position holds steady at 8s throughout, so the
+`resumeAt >= 1` guard is not the variable. The opens go 1 → 1 → 3 → 3 → 3: the
+first injection's reconnection has not landed when the second arrives, two then
+land together, and the fourth failure — the one that should find the budget
+spent and emit `.failed` — is swallowed while a reconnection is still in
+flight. The assertion then waits out two three-second `settle` timeouts, which
+is why a failing run takes six seconds and a passing one takes a tenth.
+
+Three fixes were tried and none held: waiting on `>= attempt + 1`, clamping the
+wait with `min(attempt, maxStreamReconnects)`, and injecting one failure at a
+time while waiting for the open count to advance. The first two made it fail
+every run; the third took it to six in eight. The remaining suspect is that
+`failActiveTrackForTesting` can be absorbed by an in-flight reconnection with
+no observable trace, in which case no amount of waiting on `offsetsAsked` can
+serialise it and the engine needs to expose the attempt count — but that is a
+change to production code for a test's benefit and deserves its own thought.
+
+Do not read a green run of this test as proof, and do not let it gate a merge
+on its own.
+
 Each of those failures is written up with the case it came from in
 [§12 of docs/architecture.md](docs/architecture.md#12-how-this-engine-fails).
 Worth reading once before a first change here: none of them threw, and none of
@@ -68,7 +95,22 @@ them failed a suite.
 npm run typecheck    # both tsconfigs — the second is what `prepare` uses
 npm test
 swift test
+python3 Tools/parity.py
 ```
 
-Android has no test target. Changes to `android/` are verified by building and
-running them on a device or emulator, and a commit should say which.
+`.github/workflows/checks.yml` runs those four on every push and pull request
+to `main`.
+
+**Android is built by its host, not here.** This module has no Gradle wrapper
+and no `settings.gradle`, because an Expo module is compiled by the app that
+consumes it — `expoAutolinking.useExpoModules()` in the app's
+`android/settings.gradle` is what pulls this directory into a build at all. So
+`android/src/test/` runs as `:yuzic-engine:testDebugUnitTest` through the
+*app's* `./gradlew`, against whatever commit the app has pinned. There is a
+Kotlin unit-test target now (the mutual-TLS import, its rejection cases and its
+clearing); it is reached that way rather than standalone.
+
+That is also why CI has no Android job yet. Running one means checking out the
+app, repointing its `yuzic-engine` dependency at the commit under test, and
+building through it — worth doing, and not free, since it drags the whole app's
+dependency tree and the NDK into this repository's CI.

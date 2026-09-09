@@ -345,6 +345,44 @@ What it adds, now built as `StreamingByteSource`:
   `duration × bitrate` is what the host knows. Erring high is deliberate:
   reading past the real end returns nothing, which the parser treats as
   end-of-file, whereas under-reporting truncates the track.
+
+  **Nothing may treat that estimate as the end of the audio.** `isFinished`
+  says whether the reported length is a fact or a guess, and it is false until
+  the producer's own `onFinish` fires. `AudioFileReader.readProc` reads it
+  before turning an empty read into `kAudioFileEndOfFileError`: at an estimated
+  length an empty read means only that the bytes have not arrived, and the
+  engine advances the queue on an end-of-file. That is the difference between a
+  track that stalls and one that ends itself early — which is exactly the shape
+  of the 320 kbps fault recorded on `assumedBitrate`, where a 3:21 FLAC was
+  read as 58 seconds. Erring high protects against it; refusing to trust the
+  estimate at all is what makes it structural rather than a matter of margin.
+
+- **`cancel()` unblocks reads; it does not stop the stream.** The `ByteSource`
+  contract is exactly "unblocks any waiting read" — a seek needs the decode
+  thread off the condition variable so the reader can be repositioned, and for
+  the ranged transport nothing more can be meant, since a cancelled range is
+  simply reissued. This source has one producer, started once, and stopping it
+  is irreversible: `HTTPStreamProducer.stop()` cancels the task and invalidates
+  the session, while `resume()` only clears a flag and `startIfNeeded`'s
+  `started` guard never resets. Stopping the producer in `cancel()` therefore
+  ended the transcode on the first seek, and every read afterwards waited out
+  `readWaitTimeoutSec` and threw — silence, then a track that ended itself.
+  Reported as a seek near the end of a track playing nothing and the next seek
+  skipping on; the same track downloaded was unaffected, because a local file
+  never takes this path. Teardown belongs to `deinit`, which already does it,
+  and letting the download run through a seek is better anyway: the buffer
+  keeps filling while the reader is repositioned.
+
+  **Neither fault has an Android counterpart, structurally.** Both live in the
+  hand-written byte source that exists only because Core Audio has no caching
+  data source (§2). Media3 owns the transport on Android: `seekTo` goes
+  straight to ExoPlayer, `CacheDataSource` does its own ranged refetching and
+  reconnection, and there is no `cancel`/`resume` pair and no producer to stop.
+  Nor is there a length estimate to mistake for an ending — Media3 reports
+  `TIME_UNSET` for a duration it does not know and the bridge answers `0`
+  rather than guessing. This is the one place where Android's implementation
+  being a fraction of iOS's is an advantage.
+
 - **A forward seek past the write head is a reconnection, not a read.**
   `streamURL(base:timeOffsetSeconds:)` builds the new request; the layer above
   replaces the source and reopens the reader, because the new stream's byte
