@@ -34,8 +34,9 @@ replay gain, speed, the equalizer — is a node in a graph that already exists.
 
 The cost is that the unglamorous work is yours: audio sessions, interruptions,
 route changes, decoding, caching, and the lock screen. Most of this repository
-is that work, and [`docs/architecture.md`](docs/architecture.md) explains the
-ten decisions it rests on.
+is that work, and
+[`docs/architecture.md`](https://github.com/yuzicapp/yuzic-engine/blob/main/docs/architecture.md)
+explains the ten decisions it rests on.
 
 ## What it does
 
@@ -182,5 +183,6 @@ entry, so the list cannot quietly become a record of what used to be true.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), which covers the one rule about where
-code may come from.
+See
+[CONTRIBUTING.md](https://github.com/yuzicapp/yuzic-engine/blob/main/CONTRIBUTING.md),
+which covers the one rule about where code may come from.
