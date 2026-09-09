@@ -1,0 +1,58 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+# Three jobs, and deliberately not a fourth for Android. This module has no
+# Gradle wrapper and no settings.gradle because an Expo module is built by its
+# host app, not on its own — the Android half is currently compiled by building
+# the yuzic app against a pinned engine commit. Adding a throwaway host project
+# here is the way to close that, and it is a real piece of work rather than a
+# missing line; see CONTRIBUTING.md. A job that cannot run is worse than an
+# absent one, so it is absent.
+
+jobs:
+  # The TypeScript surface: the bridge, its types, and the pure helpers.
+  typescript:
+    name: Typecheck & Test (TS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test -- --ci
+
+  # The check that exists because a method implemented on one platform and not
+  # the other is this project's characteristic failure. It compares signatures
+  # and event vocabulary, not just names, and fails on any gap not declared in
+  # KNOWN_GAPS with a reason.
+  parity:
+    name: iOS/Android parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 Tools/parity.py
+
+  # `swift test` over ios/Core through Package.swift — the model, queue rules,
+  # graph, readers and the vendored Xiph decoders. Not the Expo module, which
+  # needs a React Native toolchain to build at all.
+  ios:
+    name: Test (iOS core)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
