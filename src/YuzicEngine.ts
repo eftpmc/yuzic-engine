@@ -90,7 +90,7 @@ const ENGINE_METHODS: readonly string[] = [
   'setVolume', 'setSpeed', 'setRepeatMode', 'getState', 'getProgress',
   'setCrossfade', 'setEqualizer', 'setReplayGain', 'setSampleRateMode',
   'configureCache', 'clearCache', 'cacheStats', 'evict',
-  'setClientCertificate',
+  'setClientCertificate', 'clientCertificateRequest',
   'setBrowseTree', 'setCommands',
   'sleepAfter', 'cancelSleep',
   'addListener',

@@ -48,6 +48,13 @@ KNOWN_GAPS = {
     # not a trade worth making; the gap is honest and the app hides the setting
     # on Android until it is real.
     "setClientCertificate": "android",
+    # The API-request half of the same gap, and absent for the same reason.
+    # Android's version is an OkHttp client built from the same KeyManager, so
+    # it arrives with `setClientCertificate` or not at all — the two are one
+    # feature, and shipping either alone leaves mutual TLS half-reachable:
+    # a certificate on the audio transport cannot help when the login that
+    # precedes every track is the request the server refuses.
+    "clientCertificateRequest": "android",
 }
 
 # Events one platform declares and deliberately never sends. Same rule as

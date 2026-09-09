@@ -160,6 +160,30 @@ export interface AudioEngine {
   // trade worth making. Hosts should gate the setting on the platform.
   setClientCertificate(pkcs12Base64: string | null, password: string | null): Promise<void>;
 
+  /**
+   * Perform an HTTP request presenting the client certificate set above.
+   *
+   * Here because JavaScript's `fetch` cannot present a client identity, and a
+   * certificate that only reaches the audio transport is unreachable in
+   * practice: the app has to log in and list a library before it asks for a
+   * track, and those calls are the ones the server refuses first. So the host
+   * routes its server API calls through this exactly while a certificate is
+   * set, and uses `fetch` otherwise.
+   *
+   * Not a general networking layer, and deliberately minimal — redirects,
+   * cookies and caching are the platform's defaults. Bodies are base64 in both
+   * directions because a response is as likely to be artwork as JSON, and
+   * base64 is what carries arbitrary bytes over the bridge without a second
+   * guess about charset. Response header names arrive lowercased.
+   *
+   * A non-2xx is returned, not thrown: an HTTP error is an answer, and the
+   * callers already read `status`. It rejects only when no answer arrived at
+   * all — a failed handshake, a refused connection, a timeout.
+   *
+   * **iOS only**, like `setClientCertificate`.
+   */
+  clientCertificateRequest(options: ClientCertificateRequest): Promise<ClientCertificateResponse>;
+
   // ── platform surfaces ────────────────────────────────────────────────────
 
   /**
@@ -179,6 +203,25 @@ export interface AudioEngine {
   // ── events ───────────────────────────────────────────────────────────────
 
   addListener(listener: (event: EngineEvent) => void): () => void;
+}
+
+export interface ClientCertificateRequest {
+  url: string;
+  /** Defaults to `GET` on the native side. */
+  method?: string;
+  headers?: Record<string, string>;
+  /** Base64, because a body may be arbitrary bytes. Omit for a GET. */
+  bodyBase64?: string | null;
+  /** Ceiling for this request. Defaults to 30s, matching the app's own. */
+  timeoutMs?: number;
+}
+
+export interface ClientCertificateResponse {
+  status: number;
+  /** Header names are lowercased — HTTP does not promise a case. */
+  headers: Record<string, string>;
+  /** Base64, decoded by the caller into text or bytes as it needs. */
+  bodyBase64: string;
 }
 
 export interface EngineSetupOptions {

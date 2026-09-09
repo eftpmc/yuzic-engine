@@ -48,6 +48,10 @@ public final class YuzicEngineModule: Module {
   /// so one set after it can be handed to a factory that already exists.
   private var factory: HTTPTrackReaderFactory?
   private var clientCertificate: ClientCertificate?
+  /// The API-request path for the same certificate. Not optional and not tied
+  /// to `setup`: the app has to log in before there is anything to play, so
+  /// this has to work before the engine is set up at all.
+  private let certificateHTTP = ClientCertificateHTTP()
 
   /**
    The engine, or a named failure.
@@ -256,6 +260,7 @@ public final class YuzicEngineModule: Module {
       guard let pkcs12Base64, !pkcs12Base64.isEmpty else {
         self.clientCertificate = nil
         self.factory?.setClientCertificate(nil)
+        self.certificateHTTP.setClientCertificate(nil)
         return
       }
       guard let blob = Data(base64Encoded: pkcs12Base64) else {
@@ -264,6 +269,37 @@ public final class YuzicEngineModule: Module {
       let certificate = try ClientCertificate(pkcs12: blob, password: password ?? "")
       self.clientCertificate = certificate
       self.factory?.setClientCertificate(certificate)
+      // The API requests need the same identity as the audio stream. A
+      // certificate given to only the factory authenticates playback for a
+      // server the app cannot log into, which is no use to anyone: the login
+      // fails first and no track is ever requested.
+      self.certificateHTTP.setClientCertificate(certificate)
+    }
+
+    /**
+     Perform an HTTP request with the client certificate attached.
+
+     Here rather than in the app because JavaScript's `fetch` has no way to
+     present a client identity — this is the only path from JS to a mutual-TLS
+     server. The app routes its server API calls through this exactly when a
+     certificate is set, and uses `fetch` otherwise.
+
+     Bodies are base64 in both directions: a response may be artwork as easily
+     as JSON, and base64 is what survives arbitrary bytes over the bridge.
+     */
+    AsyncFunction("clientCertificateRequest") { (options: ClientCertificateRequestRecord) -> [String: Any] in
+      let result = try await self.certificateHTTP.request(
+        url: options.url,
+        method: options.method,
+        headers: options.headers,
+        bodyBase64: options.bodyBase64,
+        timeoutMs: options.timeoutMs
+      )
+      return [
+        "status": result.status,
+        "headers": result.headers,
+        "bodyBase64": result.bodyBase64,
+      ]
     }
 
     AsyncFunction("configureCache") { (options: CacheOptionsRecord) in
@@ -469,6 +505,17 @@ struct EqBandRecord: Record {
   @Field var frequencyHz: Double = 0
   @Field var gainDb: Double = 0
   @Field var q: Double?
+}
+
+struct ClientCertificateRequestRecord: Record {
+  @Field var url: String = ""
+  @Field var method: String = "GET"
+  @Field var headers: [String: String] = [:]
+  /// Base64 because a request body may be arbitrary bytes. Nil for a GET.
+  @Field var bodyBase64: String?
+  /// Mirrors the app's own per-request ceiling; the native side must not
+  /// outlive the timeout JavaScript believes it set.
+  @Field var timeoutMs: Int = 30_000
 }
 
 struct CacheOptionsRecord: Record {
