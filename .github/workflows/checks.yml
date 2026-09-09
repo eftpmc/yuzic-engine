@@ -98,15 +98,40 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # The engine's C++ needs the NDK, and letting Gradle fetch it is both
-      # slow and unreliable — a run here spent fourteen minutes before failing
-      # on `Archive is not a ZIP archive` from a half-downloaded NDK 27. The
-      # ubuntu runner ships NDKs already, so point Gradle at one instead of
-      # having it install its own.
-      - name: Use the runner's own NDK
+      # The engine's C++ needs an NDK, and letting Gradle install one is both
+      # slow and unreliable: one run spent fourteen minutes before failing on
+      # `Archive is not a ZIP archive` from a half-downloaded NDK 27.
+      #
+      # The version is not the app's to choose — it comes from React Native,
+      # in `react-native/gradle/libs.versions.toml`, and moves when React
+      # Native does. So it is read from there rather than pinned here, and
+      # rather than guessed at from the runner: `$ANDROID_NDK_LATEST_HOME` is
+      # NDK 29 on this image and Gradle rejects the mismatch outright
+      # ("[CXX1104] NDK from ndk.dir ... had version [29.0.14206865] which
+      # disagrees with android.ndkVersion [27.1.12297006]").
+      #
+      # Installing it with `sdkmanager` rather than leaving it to Gradle is
+      # the point: this retries and then verifies the directory exists, where
+      # Gradle's auto-installer does neither.
+      - name: Install the NDK React Native asks for
+        working-directory: app
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
-          echo "ndk.dir=$ANDROID_NDK_LATEST_HOME" >> app/android/local.properties
+          version="$(grep -E '^ndkVersion' \
+            node_modules/react-native/gradle/libs.versions.toml \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          if [ -z "$version" ]; then
+            echo "could not read ndkVersion from react-native's libs.versions.toml" >&2
+            exit 1
+          fi
+          echo "installing NDK $version"
+          for attempt in 1 2 3; do
+            yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+              "ndk;$version" && break
+            echo "sdkmanager attempt $attempt failed; retrying" >&2
+            rm -rf "$ANDROID_SDK_ROOT/ndk/$version"
+            sleep 10
+          done
+          test -d "$ANDROID_SDK_ROOT/ndk/$version"
 
       - name: Unit tests
         working-directory: app/android
