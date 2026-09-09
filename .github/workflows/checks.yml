@@ -63,11 +63,6 @@ jobs:
     name: Build & Test (Android)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout the engine
-        uses: actions/checkout@v4
-        with:
-          path: engine
-
       - name: Checkout the host app
         uses: actions/checkout@v4
         with:
@@ -86,10 +81,15 @@ jobs:
       # Build against THIS commit rather than whatever the app has pinned,
       # which is the entire point — otherwise the job silently tests the
       # engine the app already had.
+      #
+      # A `file:` dependency does NOT work here and was tried: npm symlinks it
+      # and skips `prepare`, so `lib/` is never built and Expo autolinking does
+      # not see the module at all. It has to be a git reference so the package
+      # is installed the way a consumer installs it.
       - name: Point the app at this commit
         working-directory: app
         run: |
-          npm pkg set dependencies.yuzic-engine=file:../engine
+          npm pkg set dependencies.yuzic-engine=github:yuzicapp/yuzic-engine#${{ github.event.pull_request.head.sha || github.sha }}
           npm install --no-audit --no-fund
 
       - name: Confirm the engine under test is the one that got installed
