@@ -11,6 +11,33 @@ behaviour does not.
 
 ## [Unreleased]
 
+## [1.0.3]
+
+### Fixed
+
+- On iOS, a track entered by **crossfade** could keep reporting `buffering`
+  for its whole length while the audio played normally. The lock screen drew
+  dimmed transport controls and a play glyph over playing music, with the
+  progress bar advancing correctly beside them (yuzicapp/yuzic#212).
+
+  `continueTransition` was the one path that starts a track without stating
+  `state`. At the crossover it is usually `.playing` already, so the omission
+  was invisible almost every time — but the outgoing track's last seconds are
+  exactly where the fade begins *and* where a patchy connection stalls, and
+  `onReadStalled` sets `.buffering`. That stall belongs to a playback the
+  crossover then stops and discards, and nothing could ever clear it:
+  `onReadResumed` fires on the outgoing playback and guards on it still being
+  the active one, which it no longer is.
+
+  `publishNowPlaying` maps `.buffering` to a published playback rate of `0`,
+  which is what dims iOS's transport, while `positionSec` is set from the real
+  playhead on the same dictionary and keeps the bar moving. The mapping was
+  never wrong; which state reached it was. The same stale state also blocked
+  `preloadNextIfIdle`, so the track after that one was never prefetched.
+
+  Android derives its state from Media3's player rather than tracking it, so
+  it was never affected.
+
 ## [1.0.2]
 
 ### Fixed
