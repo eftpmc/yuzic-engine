@@ -775,6 +775,62 @@ final class PlaybackEngineTests: XCTestCase {
                   + "a lost stream on it will be silent")
   }
 
+  /**
+   A stall on the outgoing track does not follow the crossfade into the next one.
+
+   Reported from a phone's lock screen (#212): the transport controls dim and
+   the glyph shows play, while the progress bar advances normally and the audio
+   plays. Intermittent, and only ever later in a track — which is the tell.
+
+   The last seconds of a track are exactly where `beginTransition` runs, and
+   also where a patchy connection stalls. `onReadStalled` sets `.buffering` on
+   the outgoing playback, and the recovery that would clear it —
+   `onReadResumed` — guards on the stalled playback still being
+   `activePlayback`. After the crossover it is not, so nothing ever clears it.
+
+   `continueTransition` was the only path that starts a track without stating
+   the state, so the engine crossed into audible music holding `.buffering`.
+   `publishNowPlaying` maps that to a published playback rate of 0, which is
+   what dims iOS's transport and draws the wrong glyph, while `positionSec` on
+   the same dictionary keeps the bar moving. It also blocks
+   `preloadNextIfIdle`, so the track after that one is never prefetched.
+
+   Asserted on `state` rather than on the published dictionary because
+   `NowPlayingTests` already covers the state → rate mapping in both
+   directions; what was broken is which state arrives there.
+   */
+  func testAStallBeforeACrossfadeDoesNotLeaveTheNextTrackBuffering() throws {
+    let (engine, _, _) = try makeEngine()
+
+    engine.setQueue([song("a"), song("b"), song("c")], startIndex: 0)
+    try engine.play()
+
+    let playing = expectation(description: "reaches playing")
+    let deadline = Date().addingTimeInterval(5)
+    DispatchQueue.global().async {
+      while Date() < deadline && engine.state != .playing { usleep(10_000) }
+      playing.fulfill()
+    }
+    wait(for: [playing], timeout: 6)
+
+    // The connection goes quiet in the outgoing track's last seconds. This is
+    // the engine's own stall signal, so it takes the same path a real dropped
+    // read does rather than a state written by the test.
+    engine.stallActiveTrackForTesting()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+    XCTAssertEqual(engine.state, .buffering, "the stall was not announced at all")
+
+    // Then the track ends anyway and the crossfade carries the next one in.
+    engine.beginTransitionForTesting(over: 0.4)
+    RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+
+    XCTAssertEqual(engine.queue.activeIndex, 1, "the crossfade did not hand over")
+    XCTAssertEqual(engine.state, .playing,
+                   "the engine crossed into a playing track still holding the "
+                   + "outgoing track's stall, so it publishes a playback rate "
+                   + "of 0 over advancing audio and never preloads again")
+  }
+
   func testSkippingMovesTheQueueAndOpensTheNewTrack() throws {
     let (engine, factory, _) = try makeEngine()
     engine.setQueue([song("a"), song("b"), song("c")], startIndex: 0)

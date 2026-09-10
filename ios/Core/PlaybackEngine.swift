@@ -1418,6 +1418,35 @@ public final class PlaybackEngine {
         self.listeningSince = self.now()
         self.transitioning = false
         self.fading = false
+        /*
+         Say the state, do not assume it.
+
+         This was the one path that started a track and left `state` alone,
+         because at the crossover it is *usually* already `.playing` — so the
+         omission was invisible almost every time. It is not always: the
+         outgoing track's last seconds run in exactly the window where a patchy
+         connection stalls, and `onReadStalled` sets `.buffering`. The stall
+         belonged to a playback that is now stopped and discarded, and nothing
+         would ever clear it: `onReadResumed` fires on the *outgoing* playback,
+         and its guard requires it to still be `self.activePlayback`, which it
+         no longer is.
+
+         So the engine crossed into a track that was audibly playing while
+         holding `.buffering` for the rest of it. `publishNowPlaying` maps that
+         to `MPNowPlayingInfoPropertyPlaybackRate: 0.0` — which is what dims the
+         lock screen transport and draws a play glyph over music that is
+         playing — while `positionSec` is set from the real playhead on the same
+         dictionary and keeps the progress bar advancing normally (#212). It
+         also stops `preloadNextIfIdle`, which requires `.playing`, so the track
+         after this one is never preloaded either.
+
+         `.playing` unconditionally is correct here rather than a fix for one
+         stale value: audio from the incoming voice has been at full gain since
+         the crossover, so by the time this runs the engine *is* playing. A
+         paused engine cannot reach this — `pause()` pauses `incomingPlayback`
+         too, and a fade cannot be running while paused.
+         */
+        self.state = .playing
         self.emit(.trackChanged(index: self.queue.activeIndex, id: next.id,
                                 previousListenedSec: listened))
         self.publishNowPlaying()
