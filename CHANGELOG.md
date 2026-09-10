@@ -11,6 +11,24 @@ behaviour does not.
 
 ## [Unreleased]
 
+## [1.0.2]
+
+### Fixed
+
+- On Android, the lock screen, notification and car display kept showing the
+  **previous track** after a crossfade. `EnginePlayer` is a `ForwardingPlayer`
+  around one of the two voices, and it overrode only the getters describing
+  *where playback is* — position, duration, state — leaving everything
+  describing *what is loaded* to the wrapped player. That was correct while
+  `swapVoices()` was never called, and the comment above it said so. Giving
+  Android engine-driven advances made the crossfade swap for the first time,
+  so after an odd number of fades the wrapped player was the *idle* voice,
+  still holding the track it last played. The metadata, timeline and media-item
+  getters now follow the active voice like the rest.
+
+  Verified on device across a crossfade: the session metadata moves with the
+  audio, where before the outgoing track's title persisted indefinitely.
+
 ## [1.0.1]
 
 Test and tooling only; no change to the engine's behaviour or its API.
@@ -95,6 +113,7 @@ point; 1.0.0 marks the API being committed to rather than the code being new.
   live one mid-track. `Tools/parity.py` declares it; every other method agrees
   across the two platforms by signature and event vocabulary.
 
-[Unreleased]: https://github.com/yuzicapp/yuzic-engine/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/yuzicapp/yuzic-engine/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/yuzicapp/yuzic-engine/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/yuzicapp/yuzic-engine/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/yuzicapp/yuzic-engine/releases/tag/v1.0.0
