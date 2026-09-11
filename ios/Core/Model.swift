@@ -24,6 +24,8 @@ public struct Track: Equatable {
   public let artist: String?
   public let album: String?
   public let artworkUri: String?
+  /// Headers used only for the artwork request, never for audio.
+  public let artworkHeaders: [String: String]
   /// `nil` means the host does not know yet — which is not zero, and the
   /// crossfade clamp treats the two differently.
   public let durationSec: Double?
@@ -42,6 +44,7 @@ public struct Track: Equatable {
     artist: String? = nil,
     album: String? = nil,
     artworkUri: String? = nil,
+    artworkHeaders: [String: String] = [:],
     durationSec: Double? = nil,
     headers: [String: String] = [:],
     followsPrevious: Bool = false,
@@ -55,6 +58,7 @@ public struct Track: Equatable {
     self.artist = artist
     self.album = album
     self.artworkUri = artworkUri
+    self.artworkHeaders = artworkHeaders
     self.durationSec = durationSec
     self.headers = headers
     self.followsPrevious = followsPrevious

@@ -107,30 +107,47 @@ public struct RemoteCommandHandlers {
  wrong is not visibly a bug. The failure mode is the *previous* track's cover
  sitting under the new track's title, which reads as artwork that loaded fine.
  */
+/// An ephemeral artwork request. Headers belong to the request, not the URL:
+/// embedding Basic credentials in a URL leaks them into logs and queue state.
+public struct ArtworkRequest: Equatable {
+  public let uri: String
+  public let headers: [String: String]
+
+  public init(uri: String, headers: [String: String] = [:]) {
+    self.uri = uri
+    self.headers = headers
+  }
+}
+
 public enum ArtworkAction: Equatable {
-  /// Same image as the outgoing track. Leave it; refetching would flicker.
+  /// Same request as the outgoing track. Leave it; refetching would flicker.
   case keep
   /// Fetch this. Whatever is showing stays up until it arrives.
-  case load(String)
+  case load(ArtworkRequest)
   /// This track has no cover. The old one has to go, or it becomes a lie.
   case clear
 }
 
-public func artworkAction(for uri: String?, currentlyLoaded loaded: String?) -> ArtworkAction {
+public func artworkAction(
+  for uri: String?, headers: [String: String] = [:], currentlyLoaded loaded: ArtworkRequest?
+) -> ArtworkAction {
   guard let uri, !uri.isEmpty else { return .clear }
-  return uri == loaded ? .keep : .load(uri)
+  let request = ArtworkRequest(uri: uri, headers: headers)
+  return request == loaded ? .keep : .load(request)
 }
 
 public final class NowPlayingCenter {
 
   private let center = MPNowPlayingInfoCenter.default()
   private let commands = MPRemoteCommandCenter.shared()
-  private var artworkURL: String?
+  private var artworkRequest: ArtworkRequest?
   private var handlers = RemoteCommandHandlers()
 
   public init() {}
 
-  public func update(_ snapshot: NowPlayingInfo.Snapshot, artworkUri: String? = nil) {
+  public func update(
+    _ snapshot: NowPlayingInfo.Snapshot, artworkUri: String? = nil, artworkHeaders: [String: String] = [:]
+  ) {
     var info = NowPlayingInfo.build(from: snapshot)
 
     // Keep whatever artwork is already loaded rather than blanking it while a
@@ -144,14 +161,14 @@ public final class NowPlayingCenter {
     // Stated, never inferred. This is the CarPlay bug.
     center.playbackState = snapshot.isPlaying ? .playing : .paused
 
-    switch artworkAction(for: artworkUri, currentlyLoaded: artworkURL) {
+    switch artworkAction(for: artworkUri, headers: artworkHeaders, currentlyLoaded: artworkRequest) {
     case .keep:
       break
-    case .load(let uri):
-      artworkURL = uri
-      loadArtwork(uri)
+    case .load(let request):
+      artworkRequest = request
+      loadArtwork(request)
     case .clear:
-      artworkURL = nil
+      artworkRequest = nil
       setArtwork(nil)
     }
   }
@@ -174,27 +191,29 @@ public final class NowPlayingCenter {
   public func clear() {
     center.nowPlayingInfo = nil
     center.playbackState = .stopped
-    artworkURL = nil
+    artworkRequest = nil
   }
 
-  private func loadArtwork(_ uri: String) {
+  private func loadArtwork(_ artwork: ArtworkRequest) {
     // UIKit-only. The package also builds for macOS so the logic above can be
     // tested by `swift test` without an app, and cover art is the one part of
     // this that genuinely cannot come along.
     #if canImport(UIKit)
-    guard let url = URL(string: uri) else { setArtwork(nil); return }
+    guard let url = URL(string: artwork.uri) else { setArtwork(nil); return }
 
     // A short timeout because this is decorative. The default is 60 seconds,
     // and a server that hangs would otherwise leave the outgoing track's cover
     // on the lock screen for a minute of the new one.
     var request = URLRequest(url: url)
     request.timeoutInterval = 10
+    artwork.headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
 
     URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
       guard let self else { return }
-      // A later track already won the race; whatever came back is not wanted,
-      // and clearing here would wipe the newer track's cover.
-      guard self.artworkURL == uri else { return }
+      // A later track (or a refreshed credential) already won the race;
+      // whatever came back is not wanted, and clearing here would wipe the
+      // newer track's cover.
+      guard self.artworkRequest == artwork else { return }
 
       guard let data, let image = UIImage(data: data) else {
         // No art for this track — a 404, a timeout, or a body that is not an
@@ -205,8 +224,8 @@ public final class NowPlayingCenter {
         return
       }
 
-      let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-      self.setArtwork(artwork)
+      let mediaArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+      self.setArtwork(mediaArtwork)
     }.resume()
     #endif
   }

@@ -24,6 +24,11 @@ export interface Track {
   /** Shown on the lock screen and in the car. Remote or local. */
   artworkUri?: string;
   /**
+   * Sent only while fetching `artworkUri`. Keep credentials out of the URL and
+   * out of persisted host state; the engine owns this ephemeral request.
+   */
+  artworkHeaders?: Record<string, string>;
+  /**
    * Seconds, when the host already knows it. The engine will discover the real
    * duration on decode; this is what the lock screen shows before then, and
    * what a progress bar can size itself against without waiting.

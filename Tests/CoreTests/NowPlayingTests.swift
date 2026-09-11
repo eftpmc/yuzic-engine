@@ -85,18 +85,18 @@ final class NowPlayingTests: XCTestCase {
    does not look like a bug. It looks like art that loaded.
    */
   func testATrackWithNoArtworkClearsTheOldCover() {
-    XCTAssertEqual(artworkAction(for: nil, currentlyLoaded: "https://a/1.jpg"), .clear)
+    XCTAssertEqual(artworkAction(for: nil, currentlyLoaded: ArtworkRequest(uri: "https://a/1.jpg")), .clear)
   }
 
   /// An empty string is a missing cover, not a URL to fetch.
   func testAnEmptyUriIsTreatedAsNoArtwork() {
-    XCTAssertEqual(artworkAction(for: "", currentlyLoaded: "https://a/1.jpg"), .clear)
+    XCTAssertEqual(artworkAction(for: "", currentlyLoaded: ArtworkRequest(uri: "https://a/1.jpg")), .clear)
   }
 
   func testANewCoverIsLoaded() {
     XCTAssertEqual(
-      artworkAction(for: "https://a/2.jpg", currentlyLoaded: "https://a/1.jpg"),
-      .load("https://a/2.jpg")
+      artworkAction(for: "https://a/2.jpg", currentlyLoaded: ArtworkRequest(uri: "https://a/1.jpg")),
+      .load(ArtworkRequest(uri: "https://a/2.jpg"))
     )
   }
 
@@ -109,13 +109,23 @@ final class NowPlayingTests: XCTestCase {
    */
   func testTheSameCoverIsKeptRatherThanRefetched() {
     XCTAssertEqual(
-      artworkAction(for: "https://a/1.jpg", currentlyLoaded: "https://a/1.jpg"),
+      artworkAction(for: "https://a/1.jpg", currentlyLoaded: ArtworkRequest(uri: "https://a/1.jpg")),
       .keep
     )
   }
 
   func testTheFirstCoverIsLoadedWhenNothingIsShowing() {
-    XCTAssertEqual(artworkAction(for: "https://a/1.jpg", currentlyLoaded: nil), .load("https://a/1.jpg"))
+    XCTAssertEqual(artworkAction(for: "https://a/1.jpg", currentlyLoaded: nil), .load(ArtworkRequest(uri: "https://a/1.jpg")))
+  }
+
+  func testChangedArtworkHeadersReloadTheSameUri() {
+    XCTAssertEqual(
+      artworkAction(
+        for: "https://a/1.jpg", headers: ["Authorization": "Basic fresh"],
+        currentlyLoaded: ArtworkRequest(uri: "https://a/1.jpg", headers: ["Authorization": "Basic stale"])
+      ),
+      .load(ArtworkRequest(uri: "https://a/1.jpg", headers: ["Authorization": "Basic fresh"]))
+    )
   }
 
   /// Nothing showing and nothing to show is not a clear-and-redraw.
