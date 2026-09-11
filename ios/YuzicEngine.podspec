@@ -129,13 +129,16 @@ Pod::Spec.new do |s|
     # `#include`d inside function bodies in lpc.c/fixed.c/bitreader.c rather
     # than compiled on their own; building them standalone fails with
     # "unknown type name 'lag'". SwiftPM's target excludes the same directory.
-    ss.source_files = 'Vendor/flac/src/**/*.{c,h}', 'Vendor/flac/include/**/*.h'
+    # Only C translation units belong to `source_files`. Adding libFLAC's
+    # private headers puts bare names such as `float.h` into CocoaPods' header
+    # map, where they shadow the SDK's `<float.h>` for UIKit itself. The C
+    # sources include them directly through the `src` search path below.
+    ss.source_files = 'Vendor/flac/src/**/*.c', 'Vendor/flac/include/**/*.h'
     ss.exclude_files = 'Vendor/flac/src/deduplication/**/*.c'
     # ...but they still have to ship, because the sources that include them
     # resolve the path relative to `src`.
     ss.preserve_paths = 'Vendor/flac/src/deduplication/*.c', 'Vendor/flac/yuzic-flac-config.h'
     ss.public_header_files = 'Vendor/flac/include/**/*.h'
-    ss.private_header_files = 'Vendor/flac/src/private/*.h', 'Vendor/flac/src/protected/*.h', 'Vendor/flac/src/share/*.h'
     ss.header_mappings_dir = 'Vendor/flac/include'
     ss.pod_target_xcconfig = {
       'HEADER_SEARCH_PATHS' => [

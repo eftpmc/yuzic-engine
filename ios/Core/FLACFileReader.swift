@@ -1,6 +1,10 @@
 import Foundation
 import AVFoundation
+// SwiftPM builds libFLAC as its own C module. CocoaPods builds all engine
+// subspecs into YuzicEngine, whose umbrella already exposes these headers.
+#if canImport(CFLAC)
 import CFLAC
+#endif
 
 /**
  FLAC, decoded by libFLAC rather than by Core Audio.
