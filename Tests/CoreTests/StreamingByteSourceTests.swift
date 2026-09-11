@@ -51,11 +51,25 @@ final class StreamingByteSourceTests: XCTestCase {
 
   func testReportsTheTrueSizeOnceTheStreamHasEnded() throws {
     let (source, producer) = makeSource(estimate: 100_000)
+    // Emitting before the first read does nothing: `FakeProducer` only captures
+    // its callbacks when `begin` runs, and `StreamingByteSource` starts the
+    // producer lazily on the first `read`. So the emit has to happen from
+    // another thread while the read is waiting — but the read returns as soon
+    // as the 16 bytes it asked for arrive, which can be *before* `finish()`
+    // lands, leaving `finished` false and `totalBytes()` still answering the
+    // estimate. That raced about once in fifty under load and reads as a real
+    // regression in whatever change is in flight.
+    //
+    // Waiting for the finish explicitly removes the race without pretending
+    // the producer is eager.
+    let finished = expectation(description: "producer finished")
     DispatchQueue.global().async {
       producer.emit(4096)
       producer.finish()
+      finished.fulfill()
     }
     _ = try source.read(offset: 0, count: 16)
+    wait(for: [finished], timeout: 5)
     // Better than the estimate, and a parser seeking relative to the end needs
     // the real one.
     XCTAssertEqual(try source.totalBytes(), 4096)

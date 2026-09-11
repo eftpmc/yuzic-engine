@@ -297,8 +297,32 @@ outright, for the format this app's audience mostly holds.
 libFLAC is therefore **architectural, not an optimisation**. Core Audio keeps
 MP3, AAC/M4A, ALAC and WAV, where seeking is targeted.
 
-Still unconfirmed on an iOS device: the frameworks are shared and the original
-report was also macOS, but nobody has run it on the phone yet.
+**Done.** `ios/Core/FLACFileReader.swift` decodes raw FLAC with the vendored
+libFLAC, and `HTTPTrackReaderFactory` routes to it on the `fLaC` magic — the
+same byte-sniff the Ogg codecs get, because a Subsonic stream URL says nothing
+about what it will send. Measured on the 46MB 24-bit file that prompted it:
+
+| | Core Audio | libFLAC |
+| --- | --- | --- |
+| forward-only source (a transcoded stream) | **cannot even open** — `openFailed(-40)`, seeks backwards on the first read | decodes 237.7s, 100%, zero seeks |
+| seek to 90% in | 177% of the file | **1.1%** of the file, via its SEEKTABLE |
+
+The forward-only column is what made yuzic#213: a lossless track's *first*
+cellular play hits a cold transcode, which Navidrome answers `200` with no
+length, so the engine correctly takes the sequential transport — where Core
+Audio's backward seeks are unservable. The same track played fine on a second
+attempt, once the server had cached the transcode and could answer `206`.
+
+Two properties of the decoder are worth keeping in mind when changing this:
+libFLAC is given **no seek/tell/length callbacks at all** when the source is
+sequential (reporting `UNSUPPORTED` is a fact about the stream; reporting an
+*error* would make it treat the file as broken), and it hands back signed
+integers **in the file's own bit depth**, so the float conversion must scale by
+that depth rather than a fixed one — the track in question is 24-bit, where
+16-bit scaling overflows by 256x.
+
+FLAC-in-Ogg is still not claimed: `oggCodec` answers nil for it and the raw
+signature check does not match, so it reaches Core Audio exactly as before.
 
 ## 10. Transcoded streams are a second transport, not a variation
 

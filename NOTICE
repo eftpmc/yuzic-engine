@@ -29,6 +29,18 @@ Apple's Core Audio supports:
   libopusfile 0.12 — ios/Vendor/opus/opusfile,
                      see ios/Vendor/opus/COPYING-opusfile
 
+libFLAC is bundled for a different reason — Core Audio decodes FLAC, but not
+in a way that can be streamed (see ios/Core/FLACFileReader.swift). Decoder
+sources only; no encoder, and no Ogg aspect:
+
+  libFLAC 1.5.0    — ios/Vendor/flac,   see ios/Vendor/flac/COPYING
+
+  Unmodified upstream sources. The only additions are
+  ios/Vendor/flac/yuzic-flac-config.h, which supplies the build configuration
+  autotools would otherwise generate, and this project's own build files.
+
+libFLAC is Copyright (C) 2000-2009 Josh Coalson and Copyright (C) 2011-2025
+Xiph.Org Foundation.
 libogg and libvorbis are Copyright (c) 2002-2020 Xiph.org Foundation.
 libopus is Copyright 2001-2011 Xiph.Org, Skype Limited, Octasic, Jean-Marc
 Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding and Erik
