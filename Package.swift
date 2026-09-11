@@ -29,6 +29,12 @@ let package = Package(
      opened by Core Audio at all — the failure is total rather than a quality
      loss.
 
+     libFLAC is here for the opposite reason: Core Audio *does* decode FLAC,
+     just not in a way this engine can stream. Its parser reads from the start
+     of the file to the seek point — measured at 177% of the file to play from
+     90% in — and it seeks backwards whenever it likes, which a forward-only
+     transcoded stream cannot serve. See docs/architecture.md §10.
+
      Separate targets rather than one, because libvorbis and libopus both
      define `mdct_lookup` in a header called `mdct.h`. A single target shares
      one header search path across every source in it, which puts both in
@@ -53,6 +59,32 @@ let package = Package(
       publicHeadersPath: "include",
       // libvorbis reaches its own `modes/` and `books/` relative to `lib`.
       cSettings: [.headerSearchPath("lib")]
+    ),
+    .target(
+      name: "CFLAC",
+      path: "ios/Vendor/flac",
+      // `deduplication/` holds fragments that `lpc.c`, `fixed.c` and
+      // `bitreader.c` **textually `#include`** inside a function body — they
+      // are not translation units and have no standalone declarations.
+      // SwiftPM compiles every .c under `sources` by default and fails on them
+      // with "unknown type name 'lag'", which reads like a broken vendor drop
+      // rather than what it is.
+      exclude: ["src/deduplication"],
+      sources: ["src"],
+      publicHeadersPath: "include",
+      cSettings: [
+        // libFLAC's sources reach their internal headers as
+        // "private/bitreader.h" and "protected/stream_decoder.h", relative to
+        // the directory `src/libFLAC` had upstream — which is `src` here.
+        .headerSearchPath("src"),
+        // And its public ones as <FLAC/format.h>.
+        .headerSearchPath("include"),
+        // Force-included rather than reached through HAVE_CONFIG_H, for the
+        // reason spelled out in `yuzic-flac-config.h` and already learned from
+        // libopus: that flag applies to every file in the target, React
+        // Native's C++ included, where it changes unrelated headers' branches.
+        .unsafeFlags(["-include", "ios/Vendor/flac/yuzic-flac-config.h"]),
+      ]
     ),
     .target(
       name: "COpus",
@@ -88,7 +120,7 @@ let package = Package(
         .define("OP_DISABLE_HTTP"),
       ]
     ),
-    .target(name: "YuzicEngineCore", dependencies: ["COgg", "CVorbis", "COpus"], path: "ios/Core"),
+    .target(name: "YuzicEngineCore", dependencies: ["COgg", "CVorbis", "COpus", "CFLAC"], path: "ios/Core"),
     .testTarget(name: "CoreTests", dependencies: ["YuzicEngineCore"], path: "Tests/CoreTests"),
   ]
 )

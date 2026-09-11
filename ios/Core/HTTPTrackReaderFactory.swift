@@ -137,9 +137,43 @@ public final class HTTPTrackReaderFactory: TrackReaderFactory {
       break
     }
 
+    // Raw FLAC, by its own four-byte magic, decoded by libFLAC rather than by
+    // Core Audio. Not a quality choice — Core Audio decodes FLAC correctly —
+    // but a streaming one: its parser seeks backwards, which a transcoded
+    // stream cannot serve at all, and reads from the start of the file to any
+    // seek point, which defeats the ranged cache. See `FLACFileReader` and
+    // docs/architecture.md §10.
+    if try Self.isRawFLAC(source) {
+      let reader = FLACFileReader(source: source)
+      try reader.open()
+      return reader
+    }
+
     let reader = AudioFileReader(source: source)
     try reader.open(hint: Self.typeHint(for: track.uri))
     return reader
+  }
+
+  /**
+   Whether this is a raw FLAC stream.
+
+   `fLaC` is a four-byte magic exactly like `OggS`, and read the same way —
+   from the bytes rather than the URI, because a Subsonic stream URL says
+   nothing about what it is about to send.
+
+   FLAC *inside* Ogg is deliberately not claimed here: `oggCodec` runs first
+   and answers nil for it, and this check requires the raw signature, so an
+   `.oga` carrying FLAC goes to Core Audio exactly as it did before. Narrow on
+   purpose — the format in the field is raw `.flac`.
+
+   A read that *fails* is not an answer, for the reason `oggCodec` spells out
+   at length: a nil from a timeout is indistinguishable from a nil meaning "an
+   MP3", so this throws and lets the caller decide.
+   */
+  static func isRawFLAC(_ source: ByteSource) throws -> Bool {
+    let head = try source.read(offset: 0, count: 4)
+    guard head.count >= 4 else { return false }
+    return [UInt8](head).starts(with: [0x66, 0x4C, 0x61, 0x43])  // "fLaC"
   }
 
   /// The codecs the engine carries its own decoder for.

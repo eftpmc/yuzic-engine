@@ -47,6 +47,7 @@ Pod::Spec.new do |s|
     ss.dependency 'YuzicEngine/Ogg'
     ss.dependency 'YuzicEngine/Vorbis'
     ss.dependency 'YuzicEngine/Opus'
+    ss.dependency 'YuzicEngine/FLAC'
   end
 
   # Xiph's decoders, one subspec each. iOS has no Vorbis or Opus decoder, so
@@ -112,6 +113,44 @@ Pod::Spec.new do |s|
         '"$(PODS_TARGET_SRCROOT)/Vendor/opus/src"',
         '"$(PODS_TARGET_SRCROOT)/Vendor/opus/opusfile"',
       ].join(' ')
+    }
+  end
+
+  # libFLAC, here for a different reason than the three above: Core Audio
+  # *does* decode FLAC. What it cannot do is stream one — its parser seeks
+  # backwards, which a transcoded (forward-only) stream cannot serve, and it
+  # reads from the start of the file to any seek point, which defeats the
+  # ranged cache. See ios/Core/FLACFileReader.swift and architecture.md §10.
+  #
+  # Decoder sources only; no encoder, and no Ogg aspect — FLAC-in-Ogg is
+  # deliberately not claimed, matching the factory's sniff.
+  s.subspec 'FLAC' do |ss|
+    # `deduplication/` is excluded because those .c files are textually
+    # `#include`d inside function bodies in lpc.c/fixed.c/bitreader.c rather
+    # than compiled on their own; building them standalone fails with
+    # "unknown type name 'lag'". SwiftPM's target excludes the same directory.
+    # Only C translation units belong to `source_files`. Adding libFLAC's
+    # private headers puts bare names such as `float.h` into CocoaPods' header
+    # map, where they shadow the SDK's `<float.h>` for UIKit itself. The C
+    # sources include them directly through the `src` search path below.
+    ss.source_files = 'Vendor/flac/src/**/*.c', 'Vendor/flac/include/**/*.h'
+    ss.exclude_files = 'Vendor/flac/src/deduplication/**/*.c'
+    # ...but they still have to ship, because the sources that include them
+    # resolve the path relative to `src`.
+    ss.preserve_paths = 'Vendor/flac/src/deduplication/*.c', 'Vendor/flac/yuzic-flac-config.h'
+    ss.public_header_files = 'Vendor/flac/include/**/*.h'
+    ss.header_mappings_dir = 'Vendor/flac/include'
+    ss.pod_target_xcconfig = {
+      'HEADER_SEARCH_PATHS' => [
+        '"$(PODS_TARGET_SRCROOT)/Vendor/flac/include"',
+        # libFLAC reaches its internal headers as "private/…" and
+        # "protected/…", relative to what upstream calls src/libFLAC.
+        '"$(PODS_TARGET_SRCROOT)/Vendor/flac/src"',
+      ].join(' '),
+      # Force-included rather than reached through HAVE_CONFIG_H, for exactly
+      # the reason the opus defines above are spelled out: that flag applies to
+      # every file in the target, React Native's C++ included.
+      'OTHER_CFLAGS' => '$(inherited) -include "$(PODS_TARGET_SRCROOT)/Vendor/flac/yuzic-flac-config.h"'
     }
   end
 
