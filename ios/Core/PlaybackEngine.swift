@@ -392,7 +392,8 @@ public final class PlaybackEngine {
         rate: 1.0,
         isLive: track.continuous
       ),
-      artworkUri: track.artworkUri
+      artworkUri: track.artworkUri,
+      artworkHeaders: track.artworkHeaders
     )
   }
 

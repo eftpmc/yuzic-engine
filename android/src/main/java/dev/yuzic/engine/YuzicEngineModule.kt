@@ -20,6 +20,11 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.records.Field
 import expo.modules.kotlin.records.Record
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
 
 /**
  * The Expo module surface — the thin part. Everything of substance lives in
@@ -42,6 +47,16 @@ class YuzicEngineModule : Module() {
 
   private val queue get() = PlaybackService.queue
   private var controllerFuture: ListenableFuture<MediaController>? = null
+
+  /**
+   * Identifies the current now-playing artwork request. Network callbacks can
+   * arrive after a skip, so only the request belonging to the current player
+   * and track may update the session metadata.
+   *
+   * Main-thread confined: reads and increments happen in [onMain] or a main
+   * handler callback.
+   */
+  private var artworkRequestToken = 0L
 
   override fun definition() = ModuleDefinition {
     Name("YuzicEngine")
@@ -69,7 +84,10 @@ class YuzicEngineModule : Module() {
       PlaybackService.eventSink = null
       PlaybackService.onSkipToNext = null
       PlaybackService.onSkipToPrevious = null
-      onMain { stopObserving() }
+      onMain {
+        artworkRequestToken += 1
+        stopObserving()
+      }
       sleepTimer.cancel()
       controllerFuture?.let { MediaController.releaseFuture(it) }
       controllerFuture = null
@@ -176,7 +194,10 @@ class YuzicEngineModule : Module() {
     AsyncFunction("clearQueue") {
       queue.clear()
       cancelTransition()
-      onMain { PlaybackService.graph?.activeVoice?.player?.clearMediaItems() }
+      onMain {
+        artworkRequestToken += 1
+        PlaybackService.graph?.activeVoice?.player?.clearMediaItems()
+      }
       TrackHeaders.clear()
       commandsMayHaveChanged()
       sendEvent("onQueueChange", emptyMap<String, Any?>())
@@ -928,12 +949,59 @@ class YuzicEngineModule : Module() {
     controllerFuture = MediaController.Builder(context, token).buildAsync()
   }
 
+  /**
+   * Fetch protected artwork through the same certificate-aware transport as
+   * audio. Media3 has no artwork-header field, so the URL is never handed to
+   * its image loader when headers are required; the completed bytes replace the
+   * now-playing item's metadata instead.
+   */
+  private fun requestProtectedArtwork(track: TrackRecord, player: ExoPlayer) {
+    val artworkUri = track.artworkUri
+    val headers = track.artworkHeaders
+    val token = ++artworkRequestToken
+    if (artworkUri.isNullOrEmpty() || headers.isNullOrEmpty()) return
+
+    val request = try {
+      Request.Builder()
+        .url(artworkUri)
+        .apply { headers.forEach { (name, value) -> header(name, value) } }
+        .build()
+    } catch (_: IllegalArgumentException) {
+      return
+    }
+
+    PlaybackService.clientCertificateTransport.audioCallFactory.newCall(request).enqueue(object : Callback {
+      override fun onFailure(call: Call, e: IOException) = Unit
+
+      override fun onResponse(call: Call, response: Response) {
+        val artwork = response.use {
+          if (!it.isSuccessful) return
+          it.body?.bytes()
+        } ?: return
+        if (artwork.isEmpty()) return
+
+        onMain {
+          // A response can finish after a skip, queue replacement, or voice
+          // swap. Replacing metadata is safe only for the exact active request.
+          if (
+            token != artworkRequestToken ||
+            queue.activeTrack !== track ||
+            PlaybackService.graph?.activeVoice?.player !== player ||
+            player.currentMediaItem?.mediaId != track.id
+          ) return@onMain
+          player.replaceMediaItem(player.currentMediaItemIndex, track.toNowPlayingMediaItem(artwork))
+        }
+      }
+    })
+  }
+
   private fun loadActiveTrack(positionMs: Long = 0L, play: Boolean = true) = onMain {
     val graph = PlaybackService.graph ?: return@onMain
     val track = queue.activeTrack ?: return@onMain
     val player = graph.activeVoice.player
-    player.setMediaItem(track.toMediaItem(), positionMs)
+    player.setMediaItem(track.toNowPlayingMediaItem(), positionMs)
     player.prepare()
+    requestProtectedArtwork(track, player)
     // The active track changed, so its replay gain did too. Set before anything
     // is audible rather than after: a track arriving at the wrong loudness and
     // being corrected a moment later is exactly what the feature is meant to
@@ -991,7 +1059,7 @@ class YuzicEngineModule : Module() {
     val incoming = graph.idleVoice
     val outgoing = graph.activeVoice
     TrackHeaders.register(next.uri, next.headers)
-    incoming.player.setMediaItem(next.toMediaItem(), 0L)
+    incoming.player.setMediaItem(next.toNowPlayingMediaItem(), 0L)
     incoming.player.prepare()
     // Before the fade begins rather than at the crossover: a track arriving at
     // the wrong loudness and being corrected halfway through the overlap is
@@ -1010,6 +1078,7 @@ class YuzicEngineModule : Module() {
       if (token != transitionToken) return@postDelayed
       graph.swapVoices()
       queue.set(queue.tracks, nextIndex)
+      requestProtectedArtwork(next, incoming.player)
       incomingTrack = null
       transitioning = false
       // The incoming track has been audible since the fade began, half a fade
@@ -1155,6 +1224,7 @@ class TrackRecord : Record {
   @Field var artist: String? = null
   @Field var album: String? = null
   @Field var artworkUri: String? = null
+  @Field var artworkHeaders: Map<String, String>? = null
   @Field var durationSec: Double? = null
   @Field var headers: Map<String, String>? = null
   @Field var followsPrevious: Boolean = false
@@ -1236,7 +1306,7 @@ class BrowseNodeRecord : Record {
  */
 fun TrackRecord.toMap(): Map<String, Any?> = mapOf(
   "id" to id, "uri" to uri, "title" to title, "artist" to artist,
-  "album" to album, "artworkUri" to artworkUri, "durationSec" to durationSec,
+  "album" to album, "artworkUri" to artworkUri, "artworkHeaders" to artworkHeaders, "durationSec" to durationSec,
   "headers" to headers, "followsPrevious" to followsPrevious,
   "replayGainDb" to replayGainDb, "replayGainPeak" to replayGainPeak,
   "continuous" to continuous,
@@ -1261,6 +1331,34 @@ fun TrackRecord.toMediaItem(): MediaItem = MediaItem.Builder()
       .setArtist(artist)
       .setAlbumTitle(album)
       .setArtworkUri(artworkUri?.let { Uri.parse(it) })
+      .setIsBrowsable(false)
+      .setIsPlayable(true)
+      .build()
+  )
+  .build()
+
+/**
+ * The playback-only media item. Protected artwork deliberately has no URI:
+ * Media3 cannot attach request headers to an artwork URI, and handing it one
+ * would cause a second, unauthenticated fetch. Browse items keep using
+ * [toMediaItem], so their artwork behavior is unchanged.
+ */
+@UnstableApi
+fun TrackRecord.toNowPlayingMediaItem(artworkData: ByteArray? = null): MediaItem = MediaItem.Builder()
+  .setMediaId(id)
+  .setUri(Uri.parse(uri))
+  .setCustomCacheKey(id)
+  .setMediaMetadata(
+    MediaMetadata.Builder()
+      .setTitle(title)
+      .setArtist(artist)
+      .setAlbumTitle(album)
+      .apply {
+        when {
+          artworkData != null -> setArtworkData(artworkData, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+          artworkHeaders.isNullOrEmpty() -> setArtworkUri(artworkUri?.let { Uri.parse(it) })
+        }
+      }
       .setIsBrowsable(false)
       .setIsPlayable(true)
       .build()

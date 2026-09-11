@@ -477,6 +477,7 @@ struct TrackRecord: Record {
   @Field var artist: String?
   @Field var album: String?
   @Field var artworkUri: String?
+  @Field var artworkHeaders: [String: String]?
   @Field var durationSec: Double?
   @Field var headers: [String: String]?
   @Field var followsPrevious: Bool = false
@@ -560,6 +561,7 @@ extension Track {
     if let artist { out["artist"] = artist }
     if let album { out["album"] = album }
     if let artworkUri { out["artworkUri"] = artworkUri }
+    if !artworkHeaders.isEmpty { out["artworkHeaders"] = artworkHeaders }
     if let durationSec { out["durationSec"] = durationSec }
     if !headers.isEmpty { out["headers"] = headers }
     if let replayGainDb { out["replayGainDb"] = replayGainDb }
@@ -583,6 +585,7 @@ extension TrackRecord {
       artist: artist,
       album: album,
       artworkUri: artworkUri,
+      artworkHeaders: artworkHeaders ?? [:],
       durationSec: durationSec,
       headers: headers ?? [:],
       followsPrevious: followsPrevious,
